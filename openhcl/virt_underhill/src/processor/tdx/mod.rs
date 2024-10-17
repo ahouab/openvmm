@@ -774,8 +774,8 @@ impl UhProcessor<'_, TdxBacked> {
         let proxy_irr = self.runner.proxy_irr();
         let kernel_irr = self.runner.kernel_ipi_offload_irr();
 
-        let mut pull_irr = |irr: [u32; 8]| {
-            if self.backing.lapic.can_offload_irr() {
+        let mut pull_irr = |irr: [u32; 8], force_no_offload: bool| {
+            if self.backing.lapic.can_offload_irr() && !force_no_offload {
                 // Put the IRR directly on the APIC page to avoid going
                 // through the local APIC.
 
@@ -792,12 +792,13 @@ impl UhProcessor<'_, TdxBacked> {
 
         // TODO TDX: filter proxy IRRs.
         if let Some(irr) = proxy_irr {
-            pull_irr(irr);
+            pull_irr(irr, false);
         }
 
         // Pull state from kernel IPI offload irr
         if let Some(irr) = kernel_irr {
-            pull_irr(irr);
+            // We need to go through the local APIC to properly update the tmr
+            pull_irr(irr, true);
         }
 
         let ApicWork {
@@ -885,15 +886,19 @@ impl UhProcessor<'_, TdxBacked> {
                     VmcsField::VMX_VMCS_EOI_EXIT_2,
                     VmcsField::VMX_VMCS_EOI_EXIT_3,
                 ];
-                for ((&field, eoi_exit), tmr) in fields
+                for ((&field, eoi_exit), (i, tmr)) in fields
                     .iter()
                     .zip(&mut self.backing.eoi_exit_bitmap)
-                    .zip(tmr.chunks_exact(2))
+                    .zip(tmr.chunks_exact(2).enumerate())
                 {
                     let tmr = tmr[0] as u64 | ((tmr[1] as u64) << 32);
                     if *eoi_exit != tmr {
                         self.runner.write_vmcs64(Vtl::Vtl0, field, !0, tmr);
                         *eoi_exit = tmr;
+                        // ipi_offload_tmr tracks the eoi_exit bitmap
+                        self.runner.kernel_ipi_offload_set_tmr(i * 2, tmr as u32);
+                        self.runner
+                            .kernel_ipi_offload_set_tmr(i * 2 + 1, (tmr >> 32) as u32);
                     }
                 }
             });

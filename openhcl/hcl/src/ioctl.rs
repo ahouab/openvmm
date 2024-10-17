@@ -1598,6 +1598,14 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
         }
     }
 
+    /// Set the kernel offload tmr
+    pub fn kernel_ipi_offload_set_tmr(&mut self, bank: usize, mask: u32) {
+        // SAFETY: the `ipi_offload_tmr` field of the run page will not be concurrently
+        // updated.
+        let tmr = unsafe { &mut *addr_of_mut!((*self.run.as_ptr()).ipi_offload_tmr) };
+        tmr[bank] = mask;
+    }
+
     /// Gets the proxied interrupt request bitmap from the hypervisor.
     pub fn proxy_irr(&mut self) -> Option<[u32; 8]> {
         // SAFETY: the `scan_proxy_irr` and `proxy_irr` fields of the run page

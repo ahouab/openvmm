@@ -125,6 +125,7 @@ pub struct hcl_run {
     pub vtl_ret_actions: [u8; VTL_RETURN_ACTION_SIZE],
     pub proxy_irr: [u32; 8],
     pub ipi_offload_irr: [u32; 8],
+    pub ipi_offload_tmr: [u32; 8],
     pub target_vtl: HvInputVtl,
 }
 
