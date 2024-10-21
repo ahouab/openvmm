@@ -10,6 +10,7 @@ use crate::protocol::hcl_cpu_context_aarch64;
 use hvdef::HvArm64RegisterName;
 use hvdef::HvRegisterName;
 use hvdef::HvRegisterValue;
+use hvdef::Vtl;
 use sidecar_client::SidecarVp;
 use std::ptr::addr_of;
 use std::ptr::addr_of_mut;
@@ -57,6 +58,7 @@ impl super::BackingPrivate for MshvArm64 {
         runner: &mut ProcessorRunner<'_, Self>,
         name: HvRegisterName,
         value: HvRegisterValue,
+        _vtl: Vtl,
     ) -> Result<bool, super::Error> {
         // Try to set the register in the CPU context, the fastest path.
         // NOTE: x18 is omitted here as it is managed by the hypervisor.
@@ -112,6 +114,7 @@ impl super::BackingPrivate for MshvArm64 {
     fn try_get_reg(
         runner: &ProcessorRunner<'_, Self>,
         name: HvRegisterName,
+        _vtl: Vtl,
     ) -> Result<Option<HvRegisterValue>, super::Error> {
         // Try to get the register from the CPU context, the fastest path.
         // NOTE: x18 is omitted here as it is managed by the hypervisor.

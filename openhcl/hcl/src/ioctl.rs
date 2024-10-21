@@ -1492,6 +1492,7 @@ mod private {
     use super::ProcessorRunner;
     use hvdef::HvRegisterName;
     use hvdef::HvRegisterValue;
+    use hvdef::Vtl;
     use sidecar_client::SidecarVp;
 
     pub trait BackingPrivate: Sized {
@@ -1501,6 +1502,7 @@ mod private {
             runner: &mut ProcessorRunner<'_, Self>,
             name: HvRegisterName,
             value: HvRegisterValue,
+            vtl: Vtl,
         ) -> Result<bool, Error>;
 
         fn must_flush_regs_on(runner: &ProcessorRunner<'_, Self>, name: HvRegisterName) -> bool;
@@ -1508,6 +1510,7 @@ mod private {
         fn try_get_reg(
             runner: &ProcessorRunner<'_, Self>,
             name: HvRegisterName,
+            vtl: Vtl,
         ) -> Result<Option<HvRegisterValue>, Error>;
     }
 }
@@ -1810,7 +1813,7 @@ impl<T: Backing> ProcessorRunner<'_, T> {
         let mut assoc = Vec::new();
         let mut offset = Vec::new();
         for (i, (&name, value)) in names.iter().zip(values.iter_mut()).enumerate() {
-            if let Some(v) = T::try_get_reg(self, name.into())? {
+            if let Some(v) = T::try_get_reg(self, name.into(), vtl)? {
                 *value = v;
             } else {
                 assoc.push(HvRegisterAssoc {
@@ -1884,7 +1887,7 @@ impl<T: Backing> ProcessorRunner<'_, T> {
                 self.set_reg(&assoc, vtl)?;
                 assoc.clear();
             }
-            if !T::try_set_reg(self, name, value)? {
+            if !T::try_set_reg(self, name, value, vtl)? {
                 assoc.push(HvRegisterAssoc {
                     name,
                     pad: Default::default(),
