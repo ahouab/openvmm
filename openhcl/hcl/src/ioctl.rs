@@ -1659,7 +1659,7 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
                 .get_vp_registers(vtl.into(), regs)
                 .map_err(Error::Sidecar)?;
         } else {
-            /// TODO: group up to MSHV_VP_MAX_REGISTERS regs. The kernel
+            // TODO: group up to MSHV_VP_MAX_REGISTERS regs. The kernel
             // currently has a bug where it only supports one register at a
             // time. Once that's fixed, this code could set a group of
             // registers in one ioctl.
@@ -1893,11 +1893,6 @@ impl<T: Backing> ProcessorRunner<'_, T> {
                     pad: Default::default(),
                     value,
                 });
-
-                if T::must_flush_regs_on(self, name) {
-                    self.set_reg(&assoc, vtl)?;
-                    assoc.clear();
-                }
             }
         }
         if !assoc.is_empty() {
