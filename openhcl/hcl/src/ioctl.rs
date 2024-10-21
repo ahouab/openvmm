@@ -122,7 +122,7 @@ pub enum Error {
     TranslateGvaToGpa(#[source] TranslateGvaToGpaError),
     #[error("gpa failed vtl access check")]
     CheckVtlAccess(#[source] HvError),
-    #[error("failed to set registers")]
+    #[error("failed to set registers using set_vp_registers hypercall")]
     SetRegisters(#[source] HvError),
     #[error("Unknown register name: {0:x}")]
     UnknownRegisterName(u32),
@@ -1608,7 +1608,10 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
                 .set_vp_registers(vtl.into(), regs)
                 .map_err(Error::Sidecar)?;
         } else {
-            // TODO: group up to MSHV_VP_MAX_REGISTERS regs
+            // TODO: group up to MSHV_VP_MAX_REGISTERS regs. The kernel
+            // currently has a bug where it only supports one register at a
+            // time. Once that's fixed, this code could set a group of
+            // registers in one ioctl.
             for reg in regs {
                 let hc_regs = &mut [HvRegisterAssoc {
                     name: reg.name,
@@ -1653,7 +1656,10 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
                 .get_vp_registers(vtl.into(), regs)
                 .map_err(Error::Sidecar)?;
         } else {
-            // TODO: group up to MSHV_VP_MAX_REGISTERS regs
+            /// TODO: group up to MSHV_VP_MAX_REGISTERS regs. The kernel
+            // currently has a bug where it only supports one register at a
+            // time. Once that's fixed, this code could set a group of
+            // registers in one ioctl.
             for reg in regs {
                 if self.is_special_register(reg.name.into()) {
                     let mut mshv_vp_register_args = mshv_vp_registers {
