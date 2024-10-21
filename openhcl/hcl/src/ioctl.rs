@@ -1490,9 +1490,9 @@ mod private {
     use super::HclVp;
     use super::NoRunner;
     use super::ProcessorRunner;
+    use crate::GuestVtl;
     use hvdef::HvRegisterName;
     use hvdef::HvRegisterValue;
-    use hvdef::Vtl;
     use sidecar_client::SidecarVp;
 
     pub trait BackingPrivate: Sized {
@@ -1502,7 +1502,7 @@ mod private {
             runner: &mut ProcessorRunner<'_, Self>,
             name: HvRegisterName,
             value: HvRegisterValue,
-            vtl: Vtl,
+            vtl: GuestVtl,
         ) -> Result<bool, Error>;
 
         fn must_flush_regs_on(runner: &ProcessorRunner<'_, Self>, name: HvRegisterName) -> bool;
@@ -1510,7 +1510,7 @@ mod private {
         fn try_get_reg(
             runner: &ProcessorRunner<'_, Self>,
             name: HvRegisterName,
-            vtl: Vtl,
+            vtl: GuestVtl,
         ) -> Result<Option<HvRegisterValue>, Error>;
     }
 }
