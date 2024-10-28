@@ -13,7 +13,6 @@ use super::ProcessorRunner;
 use super::TranslateGvaToGpaError;
 use super::TranslateResult;
 use crate::protocol::hcl_cpu_context_x64;
-use crate::GuestVtl;
 use hvdef::HvRegisterName;
 use hvdef::HvRegisterValue;
 use hvdef::HvX64RegisterName;
