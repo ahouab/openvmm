@@ -280,7 +280,7 @@ impl user_driver::vfio::VfioDmaBuffer for SharedPoolAllocator {
         &self,
         _addr: u64,
         len: usize,
-        _pfns: &[u64]
+        _pfns: &[u64],
     ) -> anyhow::Result<user_driver::memory::MemoryBlock> {
         // Restore is not yet supported for shared pool, just call regular create.
         self.create_dma_buffer(len)

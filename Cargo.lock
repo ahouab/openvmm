@@ -1545,7 +1545,6 @@ dependencies = [
  "hcl",
  "hvdef",
  "inspect",
- "libc",
  "parking_lot",
  "sparse_mmap",
  "thiserror",

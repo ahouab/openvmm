@@ -1080,10 +1080,8 @@ fn vfio_dma_buffer(
                     .context("unable to allocate fixed dma pool")
                     .unwrap();
                 Arc::new(pool.allocator())
-            },
-            false => {
-                Arc::new(LockedMemorySpawner)
             }
+            false => Arc::new(LockedMemorySpawner),
         })
 }
 
@@ -1098,9 +1096,7 @@ fn vfio_prealloc_or_restore(
         //
         // Restore the previously saved amount of DMA memory.
         //
-        Some(dma) => {
-            allocator.restore_dma_buffer(dma.dma_base, dma.dma_size, dma.pfns.as_slice())
-        },
+        Some(dma) => allocator.restore_dma_buffer(dma.dma_base, dma.dma_size, dma.pfns.as_slice()),
 
         // Cold boot - calculate amount of DMA memory based on the number of
         // configured devices. This calculation just enumerates NVMe controllers and
@@ -1118,7 +1114,7 @@ fn vfio_prealloc_or_restore(
             nvme_disks += vtl2_settings.nvme_controllers.len();
             for scsi in &vtl2_settings.scsi_controllers {
                 nvme_disks += scsi.disks.len();
-            };
+            }
 
             // Allocate or pre-allocate 1 MB per each (potential) NVMe disk and each VP.
             // There are multiple choices:
@@ -1128,7 +1124,7 @@ fn vfio_prealloc_or_restore(
             // Mark it as a FIXME: HACK: for now.
             let dma_buf_len = (nvme_disks * vp_count as usize) * 1024 * 1024;
             allocator.create_dma_buffer(dma_buf_len)
-        },
+        }
     }
 }
 
@@ -1819,9 +1815,7 @@ async fn new_underhill_vm(
         let nvme_saved_state = servicing_state.nvme_state.unwrap_or(None);
         let nvme_dma_buffer = nvme_saved_state
             .as_ref()
-            .and_then(|n| {
-                n.nvme_state.mem_buffer.as_ref()
-            });
+            .and_then(|n| n.nvme_state.mem_buffer.as_ref());
         let dma_buffer = vfio_dma_buffer(&shared_vis_pages_pool, true);
         let nvme_dma_memory = vfio_prealloc_or_restore(
             dma_buffer.clone(),
