@@ -1242,13 +1242,7 @@ impl MshvHvcall {
                         | HvX64RegisterName::VsmVpSecureConfigVtl1
                 ));
             }
-            Some(Vtl::Vtl1) => {
-                // TODO: allowed registers for VTL1
-                todo!();
-            }
-            Some(Vtl::Vtl0) => {
-                assert!(matches!(name, HvX64RegisterName::GuestOsId));
-            }
+            _ => (),
         }
 
         self.get_vp_register_for_vtl_inner(name.into(), vtl)
@@ -1276,16 +1270,7 @@ impl MshvHvcall {
                         | HvArm64RegisterName::PrivilegesAndFeaturesInfo
                 ));
             }
-            Some(Vtl::Vtl1) => {
-                // TODO: allowed registers for VTL1
-                todo!();
-            }
-            Some(Vtl::Vtl0) => {
-                assert!(matches!(
-                    name,
-                    HvArm64RegisterName::GuestOsId | HvArm64RegisterName::XPc
-                ));
-            }
+            _ => (),
         }
 
         self.get_vp_register_for_vtl_inner(name.into(), vtl)
