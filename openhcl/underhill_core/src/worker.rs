@@ -1773,11 +1773,12 @@ async fn new_underhill_vm(
     };
 
     let nvme_manager = if env_cfg.nvme_vfio {
+        let nvme_keepalive = fixed_mem_pool.is_some();
         let manager = NvmeManager::new(
             &driver_source,
             processor_topology.vp_count(),
             vfio_dma_buffer(&shared_vis_pages_pool, fixed_mem_pool.as_ref()),
-            fixed_mem_pool,
+            nvme_keepalive,
             servicing_state.nvme_state.unwrap_or(None),
         );
 
