@@ -1242,7 +1242,36 @@ impl MshvHvcall {
                         | HvX64RegisterName::VsmVpSecureConfigVtl1
                 ));
             }
-            _ => (),
+            Some(Vtl::Vtl1) => {
+                // TODO: allowed registers for VTL1
+                todo!();
+            }
+            Some(Vtl::Vtl0) => {
+                // Only VTL-private registers can go through this path.
+                // VTL-shared registers have to go through the kernel (either
+                // via the CPU context page or via the dedicated ioctl), as
+                // they may require special handling there.
+                //
+                // Register access should go through the register page if
+                // possible (as a performance optimization), so the set of
+                // registers handled here should be small. Except for
+                // GuestOsId and Sint2, in practice these registers are handled
+                // here only if the register page is unavailable (e.g., running
+                // in WHP).
+                assert!(matches!(
+                    name,
+                    HvX64RegisterName::GuestOsId
+                        | HvX64RegisterName::Cr0
+                        | HvX64RegisterName::Efer
+                        | HvX64RegisterName::Rsp
+                        | HvX64RegisterName::Ds
+                        | HvX64RegisterName::Es
+                        | HvX64RegisterName::Fs
+                        | HvX64RegisterName::Gs
+                        | HvX64RegisterName::Ss
+                        | HvX64RegisterName::Sint2
+                ));
+            }
         }
 
         self.get_vp_register_for_vtl_inner(name.into(), vtl)
@@ -1270,7 +1299,13 @@ impl MshvHvcall {
                         | HvArm64RegisterName::PrivilegesAndFeaturesInfo
                 ));
             }
-            _ => (),
+            Some(Vtl::Vtl1) => {
+                // TODO: allowed registers for VTL1
+                todo!();
+            }
+            Some(Vtl::Vtl0) => {
+                assert!(matches!(name, HvArm64RegisterName::GuestOsId));
+            }
         }
 
         self.get_vp_register_for_vtl_inner(name.into(), vtl)

@@ -204,7 +204,10 @@ impl BackingPrivate for MshvX64 {
         value: HvRegisterValue,
         vtl: GuestVtl,
     ) -> Result<bool, Error> {
-        // Try to set the register in the CPU context.
+        // Try to set the register in the CPU context. Only VTL-shared
+        // registers can be set this way: the CPU context only exposes
+        // the last VTL, and if we entered VTL2 on an interrupt, OpenHCL
+        // doesn't know what the last VTL is.
         let name = name.into();
         let set = match name {
             HvX64RegisterName::Rax
