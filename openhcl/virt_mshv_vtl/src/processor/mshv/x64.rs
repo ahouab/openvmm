@@ -604,7 +604,7 @@ impl<'a, 'b> InterceptHandler<'a, 'b> {
                 .set_vp_register(
                     HvX64RegisterName::PendingEvent0,
                     u128::from(event).into(),
-                    self.vtl,
+                    self.intercepted_vtl,
                 )
                 .map_err(|e| VpHaltReason::Hypervisor(UhRunVpError::Event(e)))?;
         }
@@ -689,14 +689,14 @@ impl<'a, 'b> InterceptHandler<'a, 'b> {
             let instruction_bytes = &instruction_bytes[..message.instruction_byte_count as usize];
             let tlb_lock_held = message.memory_access_info.gva_gpa_valid()
                 || message.memory_access_info.tlb_locked();
-            let mut state = self.vp.emulator_state(self.vtl);
+            let mut state = self.vp.emulator_state(self.intercepted_vtl);
             if let Some(bit) = virt_support_x86emu::emulate::emulate_mnf_write_fast_path(
                 instruction_bytes,
                 &mut state,
                 interruption_pending,
                 tlb_lock_held,
             ) {
-                self.vp.set_emulator_state(&state, self.vtl);
+                self.vp.set_emulator_state(&state, self.intercepted_vtl);
                 if let Some(connection_id) = self.vp.partition.monitor_page.write_bit(bit) {
                     signal_mnf(dev, connection_id);
                 }
