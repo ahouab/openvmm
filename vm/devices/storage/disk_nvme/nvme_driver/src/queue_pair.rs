@@ -4,7 +4,7 @@
 //! Implementation of an admin or IO queue pair.
 
 use super::spec;
-use crate::driver::save_restore::PendingCommandSavedState;
+use crate::driver::save_restore::PendingCommandsSavedState;
 use crate::driver::save_restore::QueuePairSavedState;
 use crate::page_allocator::PageAllocator;
 use crate::page_allocator::ScopedPages;
@@ -26,6 +26,7 @@ use pal_async::task::Task;
 use safeatomic::AtomicSliceOps;
 use slab::Slab;
 use std::future::poll_fn;
+use std::num::Wrapping;
 use std::sync::Arc;
 use std::task::Poll;
 use thiserror::Error;
@@ -35,8 +36,6 @@ use user_driver::memory::MemoryBlock;
 use user_driver::memory::PAGE_SIZE;
 use user_driver::memory::PAGE_SIZE64;
 use user_driver::DeviceBacking;
-use zerocopy::AsBytes;
-use zerocopy::FromBytes;
 use zerocopy::FromZeroes;
 
 /// Value for unused PRP entries, to catch/mitigate buffer size mismatches.
@@ -58,6 +57,94 @@ impl Inspect for QueuePair {
             mem: _,
         } = self;
         issuer.send.send(Req::Inspect(req.defer()));
+    }
+}
+
+impl PendingCommands {
+    const CID_KEY_BITS: u32 = 10;
+    const CID_KEY_MASK: u16 = (1 << Self::CID_KEY_BITS) - 1;
+    const MAX_CIDS: usize = 1 << Self::CID_KEY_BITS;
+    const CID_SEQ_OFFSET: Wrapping<u16> = Wrapping(1 << Self::CID_KEY_BITS);
+
+    fn new() -> Self {
+        Self {
+            commands: Slab::new(),
+            next_cid_high_bits: Wrapping(0),
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.commands.len() >= Self::MAX_CIDS
+    }
+
+    fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+
+    /// Inserts a command into the pending list, updating it with a new CID.
+    fn insert(
+        &mut self,
+        command: &mut spec::Command,
+        respond: mesh::OneshotSender<spec::Completion>,
+    ) {
+        let entry = self.commands.vacant_entry();
+        assert!(entry.key() < Self::MAX_CIDS);
+        assert_eq!(self.next_cid_high_bits % Self::CID_SEQ_OFFSET, Wrapping(0));
+        let cid = entry.key() as u16 | self.next_cid_high_bits.0;
+        self.next_cid_high_bits += Self::CID_SEQ_OFFSET;
+        command.cdw0.set_cid(cid);
+        entry.insert(PendingCommand {
+            command: *command,
+            respond,
+        });
+    }
+
+    fn remove(&mut self, cid: u16) -> mesh::OneshotSender<spec::Completion> {
+        let command = self
+            .commands
+            .try_remove((cid & Self::CID_KEY_MASK) as usize)
+            .expect("completion for unknown cid");
+        assert_eq!(
+            command.command.cdw0.cid(),
+            cid,
+            "cid sequence number mismatch"
+        );
+        command.respond
+    }
+
+    /// Save pending commands into a buffer.
+    pub fn save(&self) -> PendingCommandsSavedState {
+        let mut commands = Vec::new();
+        // Convert Slab into Vec.
+        for cmd in &self.commands {
+            commands.push(cmd.1.command.clone());
+        }
+        PendingCommandsSavedState {
+            commands: commands,
+            next_cid_high_bits: self.next_cid_high_bits.0,
+        }
+    }
+
+    /// Restore pending commands from the saved state.
+    pub fn restore(&mut self, saved_state: &PendingCommandsSavedState) -> anyhow::Result<()> {
+        let mut commands: Vec<(usize, PendingCommand)> = Vec::new();
+        for cmd in &saved_state.commands {
+            let (send, mut _recv) = mesh::oneshot::<nvme_spec::Completion>();
+            let pending_command = PendingCommand {
+                command: cmd.clone(),
+                respond: send,
+            };
+            // Remove high CID bits to be used as a key.
+            let cid = cmd.cdw0.cid() & Self::CID_KEY_MASK;
+            commands.push((cid as usize, pending_command));
+        }
+        // Re-create identical Slab where CIDs are correctly mapped.
+        self.commands = commands
+            .into_iter()
+            .collect::<Slab<PendingCommand>>();
+        self.next_cid_high_bits = Wrapping(saved_state.next_cid_high_bits);
+
+        Ok(())
     }
 }
 
@@ -135,8 +222,7 @@ impl QueuePair {
         let queue_handler = QueueHandler {
             sq,
             cq,
-            commands: Slab::new(),
-            max_cids: 1024,
+            commands: PendingCommands::new(),
             stats: Default::default(),
         };
 
@@ -459,6 +545,15 @@ struct Prp<'a> {
 }
 
 #[derive(Inspect)]
+struct PendingCommands {
+    /// Mapping from the low bits of cid to pending command.
+    #[inspect(iter_by_key)]
+    commands: Slab<PendingCommand>,
+    #[inspect(hex)]
+    next_cid_high_bits: Wrapping<u16>,
+}
+
+#[derive(Inspect)]
 struct PendingCommand {
     // Keep the command around for diagnostics.
     command: spec::Command,
@@ -476,10 +571,7 @@ enum Req {
 struct QueueHandler {
     sq: SubmissionQueue,
     cq: CompletionQueue,
-    /// Mapping from cid to pending command.
-    #[inspect(iter_by_key)]
-    commands: Slab<PendingCommand>,
-    max_cids: usize,
+    commands: PendingCommands,
     stats: QueueStats,
 }
 
@@ -504,7 +596,7 @@ impl QueueHandler {
             }
 
             let event = poll_fn(|cx| {
-                if !self.sq.is_full() && self.commands.len() < self.max_cids {
+                if !self.sq.is_full() && !self.commands.is_full() {
                     if let Poll::Ready(Some(req)) = recv.poll_next_unpin(cx) {
                         return Event::Request(req).into();
                     }
@@ -527,9 +619,7 @@ impl QueueHandler {
             match event {
                 Event::Request(req) => match req {
                     Req::Command(Rpc(mut command, respond)) => {
-                        let entry = self.commands.vacant_entry();
-                        command.cdw0.set_cid(entry.key() as u16);
-                        entry.insert(PendingCommand { command, respond });
+                        self.commands.insert(&mut command, respond);
                         self.sq.write(command).unwrap();
                         self.stats.issued.increment();
                     }
@@ -539,10 +629,10 @@ impl QueueHandler {
                     }
                 },
                 Event::Completion(completion) => {
-                    let command = self.commands.remove(completion.cid.into());
                     assert_eq!(completion.sqid, self.sq.id());
+                    let respond = self.commands.remove(completion.cid);
                     self.sq.update_head(completion.sqhd);
-                    command.respond.send(completion);
+                    respond.send(completion);
                     self.stats.completed.increment();
                 }
             }
@@ -551,22 +641,11 @@ impl QueueHandler {
 
     /// Save queue data for servicing.
     pub async fn save(&self) -> anyhow::Result<QueuePairSavedState> {
-        let mut pending_cmds: Vec<PendingCommandSavedState> = Vec::new();
-        for cmd in &self.commands {
-            let mut command: [u8; 64] = [0; 64];
-            command.copy_from_slice(cmd.1.command.as_bytes());
-            let command = PendingCommandSavedState {
-                command,
-                cid: cmd.0 as u16,
-            };
-            pending_cmds.push(command);
-        }
         // The data is collected from both QueuePair and QueueHandler.
         Ok(QueuePairSavedState {
-            max_cids: self.max_cids,
             sq_state: self.sq.save(),
             cq_state: self.cq.save(),
-            pending_cmds,
+            pending_cmds: self.commands.save(),
             cpu: 0,       // Will be updated by the caller.
             msix: 0,      // Will be updated by the caller.
             mem_len: 0,   // Will be updated by the caller.
@@ -576,20 +655,7 @@ impl QueueHandler {
 
     /// Restore queue data after servicing.
     pub fn restore(&mut self, saved_state: &QueuePairSavedState) -> anyhow::Result<()> {
-        self.max_cids = saved_state.max_cids;
-
-        // Restore pending commands.
-        let mut pending: Vec<(usize, PendingCommand)> = Vec::new();
-        for cmd in &saved_state.pending_cmds {
-            let (send, mut _recv) = mesh::oneshot::<nvme_spec::Completion>();
-            let pending_command = PendingCommand {
-                command: FromBytes::read_from_prefix(cmd.command.as_bytes()).unwrap(),
-                respond: send,
-            };
-            pending.push((cmd.cid as usize, pending_command));
-        }
-        self.commands = pending.into_iter().collect::<Slab<PendingCommand>>();
-
+        self.commands.restore(&saved_state.pending_cmds)?;
         self.sq.restore(&saved_state.sq_state)?;
         self.cq.restore(&saved_state.cq_state)?;
 

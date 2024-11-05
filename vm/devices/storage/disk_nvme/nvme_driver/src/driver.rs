@@ -1006,17 +1006,15 @@ pub mod save_restore {
         /// Interrupt vector (MSI-X)
         pub msix: u32,
         #[mesh(3)]
-        pub max_cids: usize,
-        #[mesh(4)]
         pub sq_state: SubmissionQueueSavedState,
-        #[mesh(5)]
+        #[mesh(4)]
         pub cq_state: CompletionQueueSavedState,
-        #[mesh(6)]
+        #[mesh(5)]
         pub mem_len: usize,
-        #[mesh(7)]
+        #[mesh(6)]
         pub pfns: Vec<u64>, // TODO: Check if region is contiguous and save 1st PFN only if true.
-        #[mesh(8)]
-        pub pending_cmds: Vec<PendingCommandSavedState>,
+        #[mesh(7)]
+        pub pending_cmds: PendingCommandsSavedState,
     }
 
     #[derive(Protobuf, Clone, Debug)]
@@ -1054,6 +1052,15 @@ pub mod save_restore {
         pub pfns: Vec<u64>,  // TODO: Check if region is contiguous and save 1st PFN only if true.
     }
 
+    #[derive(Protobuf, Clone, Debug)]
+    #[mesh(package = "underhill")]
+    pub struct PendingCommandsSavedState {
+        #[mesh(1)]
+        pub commands: Vec<spec::Command>, 
+        #[mesh(2)]
+        pub next_cid_high_bits: u16,
+    }
+
     #[derive(Protobuf, Clone, Debug, FromBytes, FromZeroes)]
     #[mesh(package = "underhill")]
     pub struct PendingCommandSavedState {
@@ -1061,15 +1068,6 @@ pub mod save_restore {
         pub command: [u8; 64],
         #[mesh(2)]
         pub cid: u16,
-    }
-
-    impl From<&[u8]> for PendingCommandSavedState {
-        fn from(value: &[u8]) -> Self {
-            let mut command: [u8; 64] = [0; 64];
-            command.copy_from_slice(value);
-            let cid = ((command[0] as u16) << 8) | command[1] as u16;
-            Self { command, cid }
-        }
     }
 
 }
