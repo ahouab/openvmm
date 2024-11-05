@@ -1352,7 +1352,32 @@ impl MshvHvcall {
                 todo!();
             }
             Some(Vtl::Vtl0) => {
-                assert!(matches!(name, HvArm64RegisterName::GuestOsId));
+                assert!(matches!(
+                    name,
+                    HvArm64RegisterName::GuestOsId
+                        | HvArm64RegisterName::XPc
+                        | HvArm64RegisterName::XSp
+                        | HvArm64RegisterName::X18
+                        | HvArm64RegisterName::Cpsr
+                        | HvArm64RegisterName::SpsrEl2
+                        | HvArm64RegisterName::InternalActivityState
+                        | HvArm64RegisterName::Sint0
+                        | HvArm64RegisterName::Sint1
+                        | HvArm64RegisterName::Sint2
+                        | HvArm64RegisterName::Sint3
+                        | HvArm64RegisterName::Sint4
+                        | HvArm64RegisterName::Sint5
+                        | HvArm64RegisterName::Sint6
+                        | HvArm64RegisterName::Sint7
+                        | HvArm64RegisterName::Sint8
+                        | HvArm64RegisterName::Sint9
+                        | HvArm64RegisterName::Sint10
+                        | HvArm64RegisterName::Sint11
+                        | HvArm64RegisterName::Sint12
+                        | HvArm64RegisterName::Sint13
+                        | HvArm64RegisterName::Sint14
+                        | HvArm64RegisterName::Sint15
+                ));
             }
         }
 
