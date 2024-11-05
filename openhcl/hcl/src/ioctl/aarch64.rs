@@ -58,7 +58,7 @@ impl super::BackingPrivate for MshvArm64 {
         runner: &mut ProcessorRunner<'_, Self>,
         name: HvRegisterName,
         value: HvRegisterValue,
-        vtl: GuestVtl,
+        _vtl: GuestVtl,
     ) -> Result<bool, super::Error> {
         // Try to set the register in the CPU context, the fastest path. Only
         // VTL-shared registers can be set this way: the CPU context only
