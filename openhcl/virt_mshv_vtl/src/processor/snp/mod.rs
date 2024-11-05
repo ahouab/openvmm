@@ -384,7 +384,6 @@ impl BackingPrivate for SnpBacked {
         sints: u16,
     ) {
         if vtl == GuestVtl::Vtl1 {
-            tracing::error!("FOOBAR handle untrusted sints for VTL1");
             todo!("TODO: handle untrusted sints for VTL1");
         }
         if this.backing.hv_sint_notifications & !sints == 0 {

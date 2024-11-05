@@ -1243,9 +1243,7 @@ impl MshvHvcall {
                 ));
             }
             Some(Vtl::Vtl1) => {
-                // TODO: allowed registers for VTL1
-                tracing::error!("FOOBAR get_vp_register_for_vtl VTL1");
-                todo!();
+                todo!("TODO: allowed registers for VTL1");
             }
             Some(Vtl::Vtl0) => {
                 // Only VTL-private registers can go through this path.
@@ -1254,10 +1252,9 @@ impl MshvHvcall {
                 // they may require special handling there.
                 //
                 // Register access should go through the register page if
-                // possible (as a performance optimization), so the set of
-                // registers handled here should be small. Except for
-                // GuestOsId and SintN, in practice these registers are handled
-                // here only if the register page is unavailable (e.g., running
+                // possible (as a performance optimization). In practice,
+                // registers that are normally available on the register page
+                // are handled here only when it is unavailable (e.g., running
                 // in WHP).
                 assert!(matches!(
                     name,
