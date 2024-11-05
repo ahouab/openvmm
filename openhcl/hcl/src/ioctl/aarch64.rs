@@ -101,9 +101,7 @@ impl super::BackingPrivate for MshvArm64 {
                 true
             }
             HvArm64RegisterName::X18 => {
-                if vtl == GuestVtl::Vtl1 {
-                    todo!("TODO: handle X18 for VTL1");
-                }
+                // TODO: handle X18 for VTL1
                 runner.cpu_context_mut().x[18] = value.as_u64();
                 false
             }
