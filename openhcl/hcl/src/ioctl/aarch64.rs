@@ -58,9 +58,12 @@ impl super::BackingPrivate for MshvArm64 {
         runner: &mut ProcessorRunner<'_, Self>,
         name: HvRegisterName,
         value: HvRegisterValue,
-        _vtl: GuestVtl,
+        vtl: GuestVtl,
     ) -> Result<bool, super::Error> {
-        // Try to set the register in the CPU context, the fastest path.
+        // Try to set the register in the CPU context, the fastest path. Only
+        // VTL-shared registers can be set this way: the CPU context only
+        // exposes the last VTL, and if we entered VTL2 on an interrupt,
+        // OpenHCL doesn't know what the last VTL is.
         // NOTE: x18 is omitted here as it is managed by the hypervisor.
         let set = match name.into() {
             HvArm64RegisterName::X0
@@ -98,6 +101,9 @@ impl super::BackingPrivate for MshvArm64 {
                 true
             }
             HvArm64RegisterName::X18 => {
+                if vtl == GuestVtl::Vtl1 {
+                    todo!("TODO: handle X18 for VTL1");
+                }
                 runner.cpu_context_mut().x[18] = value.as_u64();
                 false
             }

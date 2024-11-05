@@ -1244,6 +1244,7 @@ impl MshvHvcall {
             }
             Some(Vtl::Vtl1) => {
                 // TODO: allowed registers for VTL1
+                tracing::error!("FOOBAR get_vp_register_for_vtl VTL1");
                 todo!();
             }
             Some(Vtl::Vtl0) => {
@@ -1255,21 +1256,71 @@ impl MshvHvcall {
                 // Register access should go through the register page if
                 // possible (as a performance optimization), so the set of
                 // registers handled here should be small. Except for
-                // GuestOsId and Sint2, in practice these registers are handled
+                // GuestOsId and SintN, in practice these registers are handled
                 // here only if the register page is unavailable (e.g., running
                 // in WHP).
                 assert!(matches!(
                     name,
                     HvX64RegisterName::GuestOsId
                         | HvX64RegisterName::Cr0
+                        | HvX64RegisterName::Cr3
+                        | HvX64RegisterName::Cr4
+                        | HvX64RegisterName::Cr8
+                        | HvX64RegisterName::Dr7
                         | HvX64RegisterName::Efer
                         | HvX64RegisterName::Rsp
+                        | HvX64RegisterName::Rip
+                        | HvX64RegisterName::Rflags
+                        | HvX64RegisterName::Cs
                         | HvX64RegisterName::Ds
                         | HvX64RegisterName::Es
                         | HvX64RegisterName::Fs
                         | HvX64RegisterName::Gs
                         | HvX64RegisterName::Ss
+                        | HvX64RegisterName::InternalActivityState
+                        | HvX64RegisterName::InstructionEmulationHints
+                        | HvX64RegisterName::PendingInterruption
+                        | HvX64RegisterName::PendingEvent0
+                        | HvX64RegisterName::PendingEvent1
+                        | HvX64RegisterName::InterruptState
+                        | HvX64RegisterName::ApicBase
+                        | HvX64RegisterName::Sint0
+                        | HvX64RegisterName::Sint1
                         | HvX64RegisterName::Sint2
+                        | HvX64RegisterName::Sint3
+                        | HvX64RegisterName::Sint4
+                        | HvX64RegisterName::Sint5
+                        | HvX64RegisterName::Sint6
+                        | HvX64RegisterName::Sint7
+                        | HvX64RegisterName::Sint8
+                        | HvX64RegisterName::Sint9
+                        | HvX64RegisterName::Sint10
+                        | HvX64RegisterName::Sint11
+                        | HvX64RegisterName::Sint12
+                        | HvX64RegisterName::Sint13
+                        | HvX64RegisterName::Sint14
+                        | HvX64RegisterName::Sint15
+                        | HvX64RegisterName::Pat
+                        | HvX64RegisterName::KernelGsBase
+                        | HvX64RegisterName::SysenterCs
+                        | HvX64RegisterName::SysenterEsp
+                        | HvX64RegisterName::SysenterEip
+                        | HvX64RegisterName::Star
+                        | HvX64RegisterName::Lstar
+                        | HvX64RegisterName::Cstar
+                        | HvX64RegisterName::Sfmask
+                        | HvX64RegisterName::Tsc
+                        | HvX64RegisterName::SCet
+                        | HvX64RegisterName::Ssp
+                        | HvX64RegisterName::InterruptSspTableAddr
+                        | HvX64RegisterName::TscAux
+                        | HvX64RegisterName::VpAssistPage
+                        | HvX64RegisterName::Scontrol
+                        | HvX64RegisterName::Sifp
+                        | HvX64RegisterName::Sipp
+                        | HvX64RegisterName::Ldtr
+                        | HvX64RegisterName::Gdtr
+                        | HvX64RegisterName::Idtr
                 ));
             }
         }
@@ -1551,10 +1602,10 @@ impl<T> Drop for ProcessorRunner<'_, T> {
 
 impl<'a, T: Backing> ProcessorRunner<'a, T> {
     // These registers are handled specially by the kernel through a dedicated
-    // ioctl. is_special_register is arch-specific to guard against an into() on an
-    // HvArmRegisterName that overlaps one of these x86-specific values.
+    // ioctl. is_kernel_managed is arch-specific to guard against an into() on
+    // an HvArmRegisterName that overlaps one of these x86-specific values.
     #[cfg(guest_arch = "x86_64")]
-    fn is_special_register(&self, name: HvX64RegisterName) -> bool {
+    fn is_kernel_managed(&self, name: HvX64RegisterName) -> bool {
         if name == HvX64RegisterName::Xfem {
             if self.hcl.isolation() == IsolationType::Tdx {
                 return true;
@@ -1617,7 +1668,7 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
     }
 
     #[cfg(guest_arch = "aarch64")]
-    fn is_special_register(&self, _name: HvArm64RegisterName) -> bool {
+    fn is_kernel_managed(&self, _name: HvArm64RegisterName) -> bool {
         false
     }
 
@@ -1642,7 +1693,7 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
                     value: reg.value,
                 }];
 
-                if self.is_special_register(reg.name.into()) {
+                if self.is_kernel_managed(reg.name.into()) {
                     let hv_vp_register_args = mshv_vp_registers {
                         count: 1,
                         regs: hc_regs.as_mut_ptr(),
@@ -1684,7 +1735,7 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
             // time. Once that's fixed, this code could set a group of
             // registers in one ioctl.
             for reg in regs {
-                if self.is_special_register(reg.name.into()) {
+                if self.is_kernel_managed(reg.name.into()) {
                     let mut mshv_vp_register_args = mshv_vp_registers {
                         count: 1,
                         regs: reg,
