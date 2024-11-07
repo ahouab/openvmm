@@ -11,8 +11,8 @@
 use crate::PagePoolHandle;
 use user_driver::memory::MappedDmaTarget;
 
-/// Shared memory representing a DMA buffer useable by devices.
-pub struct SharedDmaBuffer {
+/// Page pool memory representing a DMA buffer useable by devices.
+pub struct PagePoolDmaBuffer {
     pub(crate) mapping: sparse_mmap::SparseMapping,
     // Holds allocation until dropped.
     pub(crate) _alloc: PagePoolHandle,
@@ -22,7 +22,7 @@ pub struct SharedDmaBuffer {
 /// SAFETY: This struct keeps both the shared memory region which the sparse
 /// mapping maps, along with the sparse mapping itself until the struct is drop,
 /// satisfying the trait.
-unsafe impl MappedDmaTarget for SharedDmaBuffer {
+unsafe impl MappedDmaTarget for PagePoolDmaBuffer {
     fn base(&self) -> *const u8 {
         self.mapping.as_ptr() as *const u8
     }

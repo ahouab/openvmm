@@ -9,7 +9,7 @@
 
 mod device_dma;
 
-pub use device_dma::SharedDmaBuffer;
+pub use device_dma::PagePoolDmaBuffer;
 
 #[cfg(feature = "vfio")]
 use anyhow::Context;
@@ -338,7 +338,7 @@ impl user_driver::vfio::VfioDmaBuffer for PagePoolAllocator {
 
         let pfns: Vec<_> = (alloc.base_pfn()..alloc.base_pfn() + alloc.size_pages).collect();
 
-        Ok(user_driver::memory::MemoryBlock::new(SharedDmaBuffer {
+        Ok(user_driver::memory::MemoryBlock::new(PagePoolDmaBuffer {
             mapping,
             _alloc: alloc,
             pfns,
