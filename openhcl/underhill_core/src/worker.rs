@@ -96,7 +96,7 @@ use pal_async::DefaultPool;
 use parking_lot::Mutex;
 use scsi_core::ResolveScsiDeviceHandleParams;
 use scsidisk::atapi_scsi::AtapiScsiDisk;
-use shared_pool_alloc::SharedPool;
+use shared_pool_alloc::PagePool;
 use socket2::Socket;
 use state_unit::SpawnedUnit;
 use state_unit::StateUnits;
@@ -718,7 +718,7 @@ impl UhVmNetworkSettings {
         driver_source: &VmTaskDriverSource,
         uevent_listener: &UeventListener,
         servicing_netvsp_state: &Option<Vec<crate::emuplat::netvsp::SavedState>>,
-        shared_vis_pages_pool: &Option<SharedPool>,
+        shared_vis_pages_pool: &Option<PagePool>,
         partition: Arc<UhPartition>,
         state_units: &StateUnits,
         tp: &AffinitizedThreadpool,
@@ -740,7 +740,7 @@ impl UhVmNetworkSettings {
             vps_count as u32,
             nic_max_sub_channels,
             servicing_netvsp_state,
-            vfio_dma_buffer(shared_vis_pages_pool),
+            vfio_dma_buffer(shared_vis_pages_pool, format!("nic_{}", instance_id)),
         )
         .await?;
 
@@ -848,7 +848,7 @@ impl LoadedVmNetworkSettings for UhVmNetworkSettings {
         threadpool: &AffinitizedThreadpool,
         uevent_listener: &UeventListener,
         servicing_netvsp_state: &Option<Vec<crate::emuplat::netvsp::SavedState>>,
-        shared_vis_pages_pool: &Option<SharedPool>,
+        shared_vis_pages_pool: &Option<PagePool>,
         partition: Arc<UhPartition>,
         state_units: &StateUnits,
         vmbus_server: &Option<VmbusServerHandle>,
@@ -1059,10 +1059,13 @@ fn round_up_to_2mb(bytes: u64) -> u64 {
     (bytes + (2 * 1024 * 1024) - 1) & !((2 * 1024 * 1024) - 1)
 }
 
-fn vfio_dma_buffer(shared_vis_pages_pool: &Option<SharedPool>) -> Arc<dyn VfioDmaBuffer> {
+fn vfio_dma_buffer(
+    shared_vis_pages_pool: &Option<PagePool>,
+    device_name: String,
+) -> Arc<dyn VfioDmaBuffer> {
     shared_vis_pages_pool
         .as_ref()
-        .map(|p| -> Arc<dyn VfioDmaBuffer> { Arc::new(p.allocator()) })
+        .map(|p| -> Arc<dyn VfioDmaBuffer> { Arc::new(p.allocator(device_name)) })
         .unwrap_or(Arc::new(LockedMemorySpawner))
 }
 
@@ -1444,7 +1447,7 @@ async fn new_underhill_vm(
 
     let shared_vis_pages_pool = if shared_pool_size != 0 {
         Some(
-            SharedPool::new(
+            PagePool::new_shared_visibility_pool(
                 &shared_pool,
                 measured_vtl2_info
                     .vtom_offset_bit
@@ -1492,7 +1495,10 @@ async fn new_underhill_vm(
     }
 
     // Set the shared memory allocator to GET that is required by attestation call-out.
-    if let Some(allocator) = shared_vis_pages_pool.as_ref().map(|p| p.allocator()) {
+    if let Some(allocator) = shared_vis_pages_pool
+        .as_ref()
+        .map(|p| p.allocator("get".into()))
+    {
         get_client.set_shared_memory_allocator(allocator, gm.untrusted_dma_memory().clone());
     }
 
@@ -1650,7 +1656,9 @@ async fn new_underhill_vm(
         emulate_apic,
         vmtime: &vmtime_source,
         isolated_memory_protector: gm.isolated_memory_protector()?,
-        shared_vis_pages_pool: shared_vis_pages_pool.as_ref().map(|p| p.allocator()),
+        shared_vis_pages_pool: shared_vis_pages_pool
+            .as_ref()
+            .map(|p| p.allocator("partition".into())),
     };
 
     let (partition, vps) = proto_partition
@@ -1738,7 +1746,7 @@ async fn new_underhill_vm(
         let manager = NvmeManager::new(
             &driver_source,
             processor_topology.vp_count(),
-            vfio_dma_buffer(&shared_vis_pages_pool),
+            vfio_dma_buffer(&shared_vis_pages_pool, "nvme_manager".into()),
         );
 
         resolver.add_async_resolver::<DiskHandleKind, _, NvmeDiskConfig, _>(NvmeDiskResolver::new(

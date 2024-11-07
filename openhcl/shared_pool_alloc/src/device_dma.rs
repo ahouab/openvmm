@@ -8,14 +8,14 @@
 // `base()..len()` mapped for the lifetime of the struct.
 #![allow(unsafe_code)]
 
-use crate::SharedPoolHandle;
+use crate::PagePoolHandle;
 use user_driver::memory::MappedDmaTarget;
 
 /// Shared memory representing a DMA buffer useable by devices.
 pub struct SharedDmaBuffer {
     pub(crate) mapping: sparse_mmap::SparseMapping,
     // Holds allocation until dropped.
-    pub(crate) _alloc: SharedPoolHandle,
+    pub(crate) _alloc: PagePoolHandle,
     pub(crate) pfns: Vec<u64>,
 }
 

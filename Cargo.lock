@@ -5688,6 +5688,7 @@ dependencies = [
  "hcl",
  "hvdef",
  "inspect",
+ "memory_range",
  "parking_lot",
  "sparse_mmap",
  "thiserror 2.0.0",
