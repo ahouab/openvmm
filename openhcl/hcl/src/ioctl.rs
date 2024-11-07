@@ -670,6 +670,163 @@ impl MshvVtl {
     }
 }
 
+#[cfg(guest_arch = "x86_64")]
+fn is_vtl_shared_mtrr(reg: HvX64RegisterName) -> bool {
+    matches!(
+        reg,
+        HvX64RegisterName::MsrMtrrCap
+            | HvX64RegisterName::MsrMtrrDefType
+            | HvX64RegisterName::MsrMtrrPhysBase0
+            | HvX64RegisterName::MsrMtrrPhysBase1
+            | HvX64RegisterName::MsrMtrrPhysBase2
+            | HvX64RegisterName::MsrMtrrPhysBase3
+            | HvX64RegisterName::MsrMtrrPhysBase4
+            | HvX64RegisterName::MsrMtrrPhysBase5
+            | HvX64RegisterName::MsrMtrrPhysBase6
+            | HvX64RegisterName::MsrMtrrPhysBase7
+            | HvX64RegisterName::MsrMtrrPhysBase8
+            | HvX64RegisterName::MsrMtrrPhysBase9
+            | HvX64RegisterName::MsrMtrrPhysBaseA
+            | HvX64RegisterName::MsrMtrrPhysBaseB
+            | HvX64RegisterName::MsrMtrrPhysBaseC
+            | HvX64RegisterName::MsrMtrrPhysBaseD
+            | HvX64RegisterName::MsrMtrrPhysBaseE
+            | HvX64RegisterName::MsrMtrrPhysBaseF
+            | HvX64RegisterName::MsrMtrrPhysMask0
+            | HvX64RegisterName::MsrMtrrPhysMask1
+            | HvX64RegisterName::MsrMtrrPhysMask2
+            | HvX64RegisterName::MsrMtrrPhysMask3
+            | HvX64RegisterName::MsrMtrrPhysMask4
+            | HvX64RegisterName::MsrMtrrPhysMask5
+            | HvX64RegisterName::MsrMtrrPhysMask6
+            | HvX64RegisterName::MsrMtrrPhysMask7
+            | HvX64RegisterName::MsrMtrrPhysMask8
+            | HvX64RegisterName::MsrMtrrPhysMask9
+            | HvX64RegisterName::MsrMtrrPhysMaskA
+            | HvX64RegisterName::MsrMtrrPhysMaskB
+            | HvX64RegisterName::MsrMtrrPhysMaskC
+            | HvX64RegisterName::MsrMtrrPhysMaskD
+            | HvX64RegisterName::MsrMtrrPhysMaskE
+            | HvX64RegisterName::MsrMtrrPhysMaskF
+            | HvX64RegisterName::MsrMtrrFix64k00000
+            | HvX64RegisterName::MsrMtrrFix16k80000
+            | HvX64RegisterName::MsrMtrrFix16kA0000
+            | HvX64RegisterName::MsrMtrrFix4kC0000
+            | HvX64RegisterName::MsrMtrrFix4kC8000
+            | HvX64RegisterName::MsrMtrrFix4kD0000
+            | HvX64RegisterName::MsrMtrrFix4kD8000
+            | HvX64RegisterName::MsrMtrrFix4kE0000
+            | HvX64RegisterName::MsrMtrrFix4kE8000
+            | HvX64RegisterName::MsrMtrrFix4kF0000
+            | HvX64RegisterName::MsrMtrrFix4kF8000
+    )
+}
+
+/// Indicate whether reg is shared across VTLs.
+///
+/// This function is not complete: DR6 may or may not be shared, depending on
+/// the processor type; the caller needs to check HvRegisterVsmCapabilities.
+/// Some MSRs are not included here as they are not represented in
+/// HvX64RegisterName, including MSR_TSC_FREQUENCY, MSR_MCG_CAP,
+/// MSR_MCG_STATUS, MSR_RESET, MSR_GUEST_IDLE, and MSR_DEBUG_DEVICE_OPTIONS.
+#[cfg(guest_arch = "x86_64")]
+fn is_vtl_shared_reg(reg: HvX64RegisterName) -> bool {
+    is_vtl_shared_mtrr(reg)
+        || matches!(
+            reg,
+            HvX64RegisterName::VpIndex
+                | HvX64RegisterName::VpRuntime
+                | HvX64RegisterName::TimeRefCount
+                | HvX64RegisterName::Rax
+                | HvX64RegisterName::Rbx
+                | HvX64RegisterName::Rcx
+                | HvX64RegisterName::Rdx
+                | HvX64RegisterName::Rsi
+                | HvX64RegisterName::Rdi
+                | HvX64RegisterName::Rbp
+                | HvX64RegisterName::Cr2
+                | HvX64RegisterName::R8
+                | HvX64RegisterName::R9
+                | HvX64RegisterName::R10
+                | HvX64RegisterName::R11
+                | HvX64RegisterName::R12
+                | HvX64RegisterName::R13
+                | HvX64RegisterName::R14
+                | HvX64RegisterName::R15
+                | HvX64RegisterName::Dr0
+                | HvX64RegisterName::Dr1
+                | HvX64RegisterName::Dr2
+                | HvX64RegisterName::Dr3
+                | HvX64RegisterName::Xmm0
+                | HvX64RegisterName::Xmm1
+                | HvX64RegisterName::Xmm2
+                | HvX64RegisterName::Xmm3
+                | HvX64RegisterName::Xmm4
+                | HvX64RegisterName::Xmm5
+                | HvX64RegisterName::Xmm6
+                | HvX64RegisterName::Xmm7
+                | HvX64RegisterName::Xmm8
+                | HvX64RegisterName::Xmm9
+                | HvX64RegisterName::Xmm10
+                | HvX64RegisterName::Xmm11
+                | HvX64RegisterName::Xmm12
+                | HvX64RegisterName::Xmm13
+                | HvX64RegisterName::Xmm14
+                | HvX64RegisterName::Xmm15
+                | HvX64RegisterName::FpMmx0
+                | HvX64RegisterName::FpMmx1
+                | HvX64RegisterName::FpMmx2
+                | HvX64RegisterName::FpMmx3
+                | HvX64RegisterName::FpMmx4
+                | HvX64RegisterName::FpMmx5
+                | HvX64RegisterName::FpMmx6
+                | HvX64RegisterName::FpMmx7
+                | HvX64RegisterName::FpControlStatus
+                | HvX64RegisterName::XmmControlStatus
+                | HvX64RegisterName::Xfem
+        )
+}
+
+/// Indicate whether reg is shared across VTLs.
+#[cfg(guest_arch = "aarch64")]
+fn is_vtl_shared_reg(reg: HvArm64RegisterName) -> bool {
+    use hvdef::HvArm64RegisterName;
+
+    matches!(
+        reg,
+        HvArm64RegisterName::X0
+            | HvArm64RegisterName::X1
+            | HvArm64RegisterName::X2
+            | HvArm64RegisterName::X3
+            | HvArm64RegisterName::X4
+            | HvArm64RegisterName::X5
+            | HvArm64RegisterName::X6
+            | HvArm64RegisterName::X7
+            | HvArm64RegisterName::X8
+            | HvArm64RegisterName::X9
+            | HvArm64RegisterName::X10
+            | HvArm64RegisterName::X11
+            | HvArm64RegisterName::X12
+            | HvArm64RegisterName::X13
+            | HvArm64RegisterName::X14
+            | HvArm64RegisterName::X15
+            | HvArm64RegisterName::X16
+            | HvArm64RegisterName::X17
+            | HvArm64RegisterName::X19
+            | HvArm64RegisterName::X20
+            | HvArm64RegisterName::X21
+            | HvArm64RegisterName::X22
+            | HvArm64RegisterName::X23
+            | HvArm64RegisterName::X24
+            | HvArm64RegisterName::X25
+            | HvArm64RegisterName::X26
+            | HvArm64RegisterName::X27
+            | HvArm64RegisterName::X28
+            | HvArm64RegisterName::XFp
+            | HvArm64RegisterName::XLr
+    )
+}
+
 /// The `/dev/mshv_hvcall` device for issuing hypercalls directly to the
 /// hypervisor.
 #[derive(Debug)]
@@ -1256,69 +1413,7 @@ impl MshvHvcall {
                 // registers that are normally available on the register page
                 // are handled here only when it is unavailable (e.g., running
                 // in WHP).
-                assert!(matches!(
-                    name,
-                    HvX64RegisterName::GuestOsId
-                        | HvX64RegisterName::Cr0
-                        | HvX64RegisterName::Cr3
-                        | HvX64RegisterName::Cr4
-                        | HvX64RegisterName::Cr8
-                        | HvX64RegisterName::Dr7
-                        | HvX64RegisterName::Efer
-                        | HvX64RegisterName::Rsp
-                        | HvX64RegisterName::Rip
-                        | HvX64RegisterName::Rflags
-                        | HvX64RegisterName::Cs
-                        | HvX64RegisterName::Ds
-                        | HvX64RegisterName::Es
-                        | HvX64RegisterName::Fs
-                        | HvX64RegisterName::Gs
-                        | HvX64RegisterName::Ss
-                        | HvX64RegisterName::InternalActivityState
-                        | HvX64RegisterName::InstructionEmulationHints
-                        | HvX64RegisterName::PendingInterruption
-                        | HvX64RegisterName::PendingEvent0
-                        | HvX64RegisterName::PendingEvent1
-                        | HvX64RegisterName::InterruptState
-                        | HvX64RegisterName::ApicBase
-                        | HvX64RegisterName::Sint0
-                        | HvX64RegisterName::Sint1
-                        | HvX64RegisterName::Sint2
-                        | HvX64RegisterName::Sint3
-                        | HvX64RegisterName::Sint4
-                        | HvX64RegisterName::Sint5
-                        | HvX64RegisterName::Sint6
-                        | HvX64RegisterName::Sint7
-                        | HvX64RegisterName::Sint8
-                        | HvX64RegisterName::Sint9
-                        | HvX64RegisterName::Sint10
-                        | HvX64RegisterName::Sint11
-                        | HvX64RegisterName::Sint12
-                        | HvX64RegisterName::Sint13
-                        | HvX64RegisterName::Sint14
-                        | HvX64RegisterName::Sint15
-                        | HvX64RegisterName::Pat
-                        | HvX64RegisterName::KernelGsBase
-                        | HvX64RegisterName::SysenterCs
-                        | HvX64RegisterName::SysenterEsp
-                        | HvX64RegisterName::SysenterEip
-                        | HvX64RegisterName::Star
-                        | HvX64RegisterName::Lstar
-                        | HvX64RegisterName::Cstar
-                        | HvX64RegisterName::Sfmask
-                        | HvX64RegisterName::Tsc
-                        | HvX64RegisterName::SCet
-                        | HvX64RegisterName::Ssp
-                        | HvX64RegisterName::InterruptSspTableAddr
-                        | HvX64RegisterName::TscAux
-                        | HvX64RegisterName::VpAssistPage
-                        | HvX64RegisterName::Scontrol
-                        | HvX64RegisterName::Sifp
-                        | HvX64RegisterName::Sipp
-                        | HvX64RegisterName::Ldtr
-                        | HvX64RegisterName::Gdtr
-                        | HvX64RegisterName::Idtr
-                ));
+                assert!(!is_vtl_shared_reg(name));
             }
         }
 
@@ -1352,32 +1447,11 @@ impl MshvHvcall {
                 todo!();
             }
             Some(Vtl::Vtl0) => {
-                assert!(matches!(
-                    name,
-                    HvArm64RegisterName::GuestOsId
-                        | HvArm64RegisterName::XPc
-                        | HvArm64RegisterName::XSp
-                        | HvArm64RegisterName::X18
-                        | HvArm64RegisterName::Cpsr
-                        | HvArm64RegisterName::SpsrEl2
-                        | HvArm64RegisterName::InternalActivityState
-                        | HvArm64RegisterName::Sint0
-                        | HvArm64RegisterName::Sint1
-                        | HvArm64RegisterName::Sint2
-                        | HvArm64RegisterName::Sint3
-                        | HvArm64RegisterName::Sint4
-                        | HvArm64RegisterName::Sint5
-                        | HvArm64RegisterName::Sint6
-                        | HvArm64RegisterName::Sint7
-                        | HvArm64RegisterName::Sint8
-                        | HvArm64RegisterName::Sint9
-                        | HvArm64RegisterName::Sint10
-                        | HvArm64RegisterName::Sint11
-                        | HvArm64RegisterName::Sint12
-                        | HvArm64RegisterName::Sint13
-                        | HvArm64RegisterName::Sint14
-                        | HvArm64RegisterName::Sint15
-                ));
+                // Only VTL-private registers can go through this path.
+                // VTL-shared registers have to go through the kernel (either
+                // via the CPU context page or via the dedicated ioctl), as
+                // they may require special handling there.
+                assert!(!is_vtl_shared_reg(name));
             }
         }
 
@@ -1634,59 +1708,15 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
             }
         }
 
-        matches!(
-            name,
-            HvX64RegisterName::MsrMtrrCap
-                | HvX64RegisterName::MsrMtrrDefType
-                | HvX64RegisterName::MsrMtrrPhysBase0
-                | HvX64RegisterName::MsrMtrrPhysBase1
-                | HvX64RegisterName::MsrMtrrPhysBase2
-                | HvX64RegisterName::MsrMtrrPhysBase3
-                | HvX64RegisterName::MsrMtrrPhysBase4
-                | HvX64RegisterName::MsrMtrrPhysBase5
-                | HvX64RegisterName::MsrMtrrPhysBase6
-                | HvX64RegisterName::MsrMtrrPhysBase7
-                | HvX64RegisterName::MsrMtrrPhysBase8
-                | HvX64RegisterName::MsrMtrrPhysBase9
-                | HvX64RegisterName::MsrMtrrPhysBaseA
-                | HvX64RegisterName::MsrMtrrPhysBaseB
-                | HvX64RegisterName::MsrMtrrPhysBaseC
-                | HvX64RegisterName::MsrMtrrPhysBaseD
-                | HvX64RegisterName::MsrMtrrPhysBaseE
-                | HvX64RegisterName::MsrMtrrPhysBaseF
-                | HvX64RegisterName::MsrMtrrPhysMask0
-                | HvX64RegisterName::MsrMtrrPhysMask1
-                | HvX64RegisterName::MsrMtrrPhysMask2
-                | HvX64RegisterName::MsrMtrrPhysMask3
-                | HvX64RegisterName::MsrMtrrPhysMask4
-                | HvX64RegisterName::MsrMtrrPhysMask5
-                | HvX64RegisterName::MsrMtrrPhysMask6
-                | HvX64RegisterName::MsrMtrrPhysMask7
-                | HvX64RegisterName::MsrMtrrPhysMask8
-                | HvX64RegisterName::MsrMtrrPhysMask9
-                | HvX64RegisterName::MsrMtrrPhysMaskA
-                | HvX64RegisterName::MsrMtrrPhysMaskB
-                | HvX64RegisterName::MsrMtrrPhysMaskC
-                | HvX64RegisterName::MsrMtrrPhysMaskD
-                | HvX64RegisterName::MsrMtrrPhysMaskE
-                | HvX64RegisterName::MsrMtrrPhysMaskF
-                | HvX64RegisterName::MsrMtrrFix64k00000
-                | HvX64RegisterName::MsrMtrrFix16k80000
-                | HvX64RegisterName::MsrMtrrFix16kA0000
-                | HvX64RegisterName::MsrMtrrFix4kC0000
-                | HvX64RegisterName::MsrMtrrFix4kC8000
-                | HvX64RegisterName::MsrMtrrFix4kD0000
-                | HvX64RegisterName::MsrMtrrFix4kD8000
-                | HvX64RegisterName::MsrMtrrFix4kE0000
-                | HvX64RegisterName::MsrMtrrFix4kE8000
-                | HvX64RegisterName::MsrMtrrFix4kF0000
-                | HvX64RegisterName::MsrMtrrFix4kF8000
-                | HvX64RegisterName::Dr0
-                | HvX64RegisterName::Dr1
-                | HvX64RegisterName::Dr2
-                | HvX64RegisterName::Dr3
-                | HvX64RegisterName::Dr6
-        )
+        is_vtl_shared_mtrr(name)
+            || matches!(
+                name,
+                HvX64RegisterName::Dr0
+                    | HvX64RegisterName::Dr1
+                    | HvX64RegisterName::Dr2
+                    | HvX64RegisterName::Dr3
+                    | HvX64RegisterName::Dr6
+            )
     }
 
     #[cfg(guest_arch = "aarch64")]
