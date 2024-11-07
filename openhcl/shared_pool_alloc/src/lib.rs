@@ -277,11 +277,7 @@ impl user_driver::vfio::VfioDmaBuffer for SharedPoolAllocator {
     }
 
     // Restore for shared pool just calls regular allocate.
-    fn restore_dma_buffer(
-        &self,
-        len: usize,
-        _pfns: &[u64],
-    ) -> anyhow::Result<MemoryBlock> {
+    fn restore_dma_buffer(&self, len: usize, _pfns: &[u64]) -> anyhow::Result<MemoryBlock> {
         self.create_dma_buffer(len)
     }
 }

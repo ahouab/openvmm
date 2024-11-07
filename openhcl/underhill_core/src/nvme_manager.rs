@@ -309,9 +309,7 @@ impl NvmeManagerWorker {
         pci_id: String,
     ) -> Result<&mut nvme_driver::NvmeDriver<VfioDevice>, InnerError> {
         let driver = match self.devices.entry(pci_id.to_owned()) {
-            hash_map::Entry::Occupied(entry) => {
-                entry.into_mut()
-            }
+            hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hash_map::Entry::Vacant(entry) => {
                 let device =
                     VfioDevice::new(&self.driver_source, entry.key(), self.dma_buffer.clone())
@@ -319,18 +317,14 @@ impl NvmeManagerWorker {
                         .await
                         .map_err(InnerError::Vfio)?;
 
-
-                let driver = nvme_driver::NvmeDriver::new(
-                    &self.driver_source,
-                    self.vp_count,
-                    device,
-                )
-                .instrument(tracing::info_span!(
-                    "nvme_driver_init",
-                    pci_id = entry.key()
-                ))
-                .await
-                .map_err(InnerError::DeviceInitFailed)?;
+                let driver =
+                    nvme_driver::NvmeDriver::new(&self.driver_source, self.vp_count, device)
+                        .instrument(tracing::info_span!(
+                            "nvme_driver_init",
+                            pci_id = entry.key()
+                        ))
+                        .await
+                        .map_err(InnerError::DeviceInitFailed)?;
 
                 entry.insert(driver)
             }
