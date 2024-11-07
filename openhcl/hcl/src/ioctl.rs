@@ -1191,8 +1191,8 @@ impl MshvHvcall {
     /// panic if the hypercall fails.
     fn get_vp_register_for_vtl_inner(
         &self,
-        name: HvRegisterName,
         target_vtl: HvInputVtl,
+        name: HvRegisterName,
     ) -> HvRegisterValue {
         let header = hvdef::hypercall::GetSetVpRegisters {
             partition_id: HV_PARTITION_ID_SELF,
@@ -1226,8 +1226,8 @@ impl MshvHvcall {
     #[cfg(guest_arch = "x86_64")]
     pub fn get_vp_register_for_vtl(
         &self,
-        name: HvX64RegisterName,
         vtl: HvInputVtl,
+        name: HvX64RegisterName,
     ) -> HvRegisterValue {
         match vtl.target_vtl().unwrap() {
             None | Some(Vtl::Vtl2) => {
@@ -1322,7 +1322,7 @@ impl MshvHvcall {
             }
         }
 
-        self.get_vp_register_for_vtl_inner(name.into(), vtl)
+        self.get_vp_register_for_vtl_inner(vtl, name.into())
     }
 
     /// Get a single VP register for the given VTL via hypercall. Only a select
@@ -1330,8 +1330,8 @@ impl MshvHvcall {
     #[cfg(guest_arch = "aarch64")]
     pub fn get_vp_register_for_vtl(
         &self,
-        name: HvArm64RegisterName,
         vtl: HvInputVtl,
+        name: HvArm64RegisterName,
     ) -> HvRegisterValue {
         match vtl.target_vtl().unwrap() {
             None | Some(Vtl::Vtl2) => {
@@ -1381,7 +1381,7 @@ impl MshvHvcall {
             }
         }
 
-        self.get_vp_register_for_vtl_inner(name.into(), vtl)
+        self.get_vp_register_for_vtl_inner(vtl, name.into())
     }
 }
 
@@ -1593,17 +1593,17 @@ mod private {
 
         fn try_set_reg(
             runner: &mut ProcessorRunner<'_, Self>,
+            vtl: GuestVtl,
             name: HvRegisterName,
             value: HvRegisterValue,
-            vtl: GuestVtl,
         ) -> Result<bool, Error>;
 
         fn must_flush_regs_on(runner: &ProcessorRunner<'_, Self>, name: HvRegisterName) -> bool;
 
         fn try_get_reg(
             runner: &ProcessorRunner<'_, Self>,
-            name: HvRegisterName,
             vtl: GuestVtl,
+            name: HvRegisterName,
         ) -> Result<Option<HvRegisterValue>, Error>;
     }
 }
@@ -1694,7 +1694,7 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
         false
     }
 
-    fn set_reg(&mut self, regs: &[HvRegisterAssoc], vtl: GuestVtl) -> Result<(), Error> {
+    fn set_reg(&mut self, vtl: GuestVtl, regs: &[HvRegisterAssoc]) -> Result<(), Error> {
         if regs.is_empty() {
             return Ok(());
         }
@@ -1742,7 +1742,7 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
         Ok(())
     }
 
-    fn get_reg(&mut self, regs: &mut [HvRegisterAssoc], vtl: GuestVtl) -> Result<(), Error> {
+    fn get_reg(&mut self, vtl: GuestVtl, regs: &mut [HvRegisterAssoc]) -> Result<(), Error> {
         if regs.is_empty() {
             return Ok(());
         }
@@ -1775,7 +1775,7 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
                     reg.value = self
                         .hcl
                         .mshv_hvcall
-                        .get_vp_register_for_vtl(reg.name.into(), vtl.into());
+                        .get_vp_register_for_vtl(vtl.into(), reg.name.into());
                 }
             }
         }
@@ -1898,15 +1898,15 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
 impl<T: Backing> ProcessorRunner<'_, T> {
     fn get_vp_registers_inner<R: Copy + Into<HvRegisterName>>(
         &mut self,
+        vtl: GuestVtl,
         names: &[R],
         values: &mut [HvRegisterValue],
-        vtl: GuestVtl,
     ) -> Result<(), Error> {
         assert_eq!(names.len(), values.len());
         let mut assoc = Vec::new();
         let mut offset = Vec::new();
         for (i, (&name, value)) in names.iter().zip(values.iter_mut()).enumerate() {
-            if let Some(v) = T::try_get_reg(self, name.into(), vtl)? {
+            if let Some(v) = T::try_get_reg(self, vtl, name.into())? {
                 *value = v;
             } else {
                 assoc.push(HvRegisterAssoc {
@@ -1918,7 +1918,7 @@ impl<T: Backing> ProcessorRunner<'_, T> {
             }
         }
 
-        self.get_reg(&mut assoc, vtl)?;
+        self.get_reg(vtl, &mut assoc)?;
         for (&i, assoc) in offset.iter().zip(&assoc) {
             values[i] = assoc.value;
         }
@@ -1931,12 +1931,12 @@ impl<T: Backing> ProcessorRunner<'_, T> {
     /// registers that are shared between VTL0 and VTL2.
     pub fn get_vp_register(
         &mut self,
+        vtl: GuestVtl,
         #[cfg(guest_arch = "x86_64")] name: HvX64RegisterName,
         #[cfg(guest_arch = "aarch64")] name: HvArm64RegisterName,
-        vtl: GuestVtl,
     ) -> Result<HvRegisterValue, Error> {
         let mut value = [0u64.into(); 1];
-        self.get_vp_registers_inner(&[name], &mut value, vtl)?;
+        self.get_vp_registers_inner(vtl, &[name], &mut value)?;
         Ok(value[0])
     }
 
@@ -1946,12 +1946,12 @@ impl<T: Backing> ProcessorRunner<'_, T> {
     /// Panics if `names.len() != values.len()`.
     pub fn get_vp_registers(
         &mut self,
+        vtl: GuestVtl,
         #[cfg(guest_arch = "x86_64")] names: &[HvX64RegisterName],
         #[cfg(guest_arch = "aarch64")] names: &[HvArm64RegisterName],
         values: &mut [HvRegisterValue],
-        vtl: GuestVtl,
     ) -> Result<(), Error> {
-        self.get_vp_registers_inner(names, values, vtl)
+        self.get_vp_registers_inner(vtl, names, values)
     }
 
     /// Set the following register on the current VP.
@@ -1960,16 +1960,16 @@ impl<T: Backing> ProcessorRunner<'_, T> {
     /// registers that are shared between VTL0 and VTL2.
     pub fn set_vp_register(
         &mut self,
+        vtl: GuestVtl,
         #[cfg(guest_arch = "x86_64")] name: HvX64RegisterName,
         #[cfg(guest_arch = "aarch64")] name: HvArm64RegisterName,
         value: HvRegisterValue,
-        vtl: GuestVtl,
     ) -> Result<(), Error> {
-        self.set_vp_registers([(name, value)], vtl)
+        self.set_vp_registers(vtl, [(name, value)])
     }
 
     /// Sets a set of VP registers.
-    pub fn set_vp_registers<I>(&mut self, values: I, vtl: GuestVtl) -> Result<(), Error>
+    pub fn set_vp_registers<I>(&mut self, vtl: GuestVtl, values: I) -> Result<(), Error>
     where
         I: IntoIterator,
         I::Item: Into<HvRegisterAssoc> + Clone,
@@ -1977,10 +1977,10 @@ impl<T: Backing> ProcessorRunner<'_, T> {
         let mut assoc = Vec::new();
         for HvRegisterAssoc { name, value, .. } in values.into_iter().map(Into::into) {
             if !assoc.is_empty() && T::must_flush_regs_on(self, name) {
-                self.set_reg(&assoc, vtl)?;
+                self.set_reg(vtl, &assoc)?;
                 assoc.clear();
             }
-            if !T::try_set_reg(self, name, value, vtl)? {
+            if !T::try_set_reg(self, vtl, name, value)? {
                 assoc.push(HvRegisterAssoc {
                     name,
                     pad: Default::default(),
@@ -1989,7 +1989,7 @@ impl<T: Backing> ProcessorRunner<'_, T> {
             }
         }
         if !assoc.is_empty() {
-            self.set_reg(&assoc, vtl)?;
+            self.set_reg(vtl, &assoc)?;
         }
         Ok(())
     }
@@ -2433,7 +2433,7 @@ impl Hcl {
         name: impl Into<HvX64RegisterName>,
         vtl: HvInputVtl,
     ) -> HvRegisterValue {
-        self.mshv_hvcall.get_vp_register_for_vtl(name.into(), vtl)
+        self.mshv_hvcall.get_vp_register_for_vtl(vtl, name.into())
     }
 
     /// Get a single VP register for the given VTL via hypercall. Only a select
@@ -2444,7 +2444,7 @@ impl Hcl {
         name: impl Into<HvArm64RegisterName>,
         vtl: HvInputVtl,
     ) -> HvRegisterValue {
-        self.mshv_hvcall.get_vp_register_for_vtl(name.into(), vtl)
+        self.mshv_hvcall.get_vp_register_for_vtl(vtl, name.into())
     }
 
     /// Set a single VP register via hypercall as VTL2. Only a select set of registers are

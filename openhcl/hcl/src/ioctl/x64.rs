@@ -200,9 +200,9 @@ impl BackingPrivate for MshvX64 {
 
     fn try_set_reg(
         runner: &mut ProcessorRunner<'_, Self>,
+        vtl: GuestVtl,
         name: HvRegisterName,
         value: HvRegisterValue,
-        vtl: GuestVtl,
     ) -> Result<bool, Error> {
         // Try to set the register in the CPU context, the fastest path. Only
         // VTL-shared registers can be set this way: the CPU context only
@@ -312,8 +312,8 @@ impl BackingPrivate for MshvX64 {
 
     fn try_get_reg(
         runner: &ProcessorRunner<'_, Self>,
-        name: HvRegisterName,
         vtl: GuestVtl,
+        name: HvRegisterName,
     ) -> Result<Option<HvRegisterValue>, Error> {
         let name = name.into();
 

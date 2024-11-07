@@ -862,7 +862,7 @@ impl<'a, T: Backing> UhProcessor<'a, T> {
                             #[cfg(guest_arch = "aarch64")]
                             let sint_reg =
                                 HvArm64RegisterName(HvArm64RegisterName::Sint0.0 + sint as u32);
-                            self.runner.get_vp_register(sint_reg, vtl).unwrap().as_u64()
+                            self.runner.get_vp_register(vtl, sint_reg).unwrap().as_u64()
                         };
                         masked_sints |= (HvSynicSint::from(sint_msr).masked() as u16) << sint;
                     }
@@ -1210,7 +1210,7 @@ impl<T: CpuIo, B: Backing> Arm64RegisterState for UhHypercallHandler<'_, '_, T, 
     fn pc(&mut self) -> u64 {
         self.vp
             .runner
-            .get_vp_register(HvArm64RegisterName::XPc, self.intercepted_vtl)
+            .get_vp_register(self.intercepted_vtl, HvArm64RegisterName::XPc)
             .expect("get vp register cannot fail")
             .as_u64()
     }
@@ -1218,7 +1218,7 @@ impl<T: CpuIo, B: Backing> Arm64RegisterState for UhHypercallHandler<'_, '_, T, 
     fn set_pc(&mut self, pc: u64) {
         self.vp
             .runner
-            .set_vp_register(HvArm64RegisterName::XPc, pc.into(), self.intercepted_vtl)
+            .set_vp_register(self.intercepted_vtl, HvArm64RegisterName::XPc, pc.into())
             .expect("set vp register cannot fail");
     }
 
@@ -1226,8 +1226,8 @@ impl<T: CpuIo, B: Backing> Arm64RegisterState for UhHypercallHandler<'_, '_, T, 
         self.vp
             .runner
             .get_vp_register(
-                HvArm64RegisterName(HvArm64RegisterName::X0.0 + n as u32),
                 self.intercepted_vtl,
+                HvArm64RegisterName(HvArm64RegisterName::X0.0 + n as u32),
             )
             .expect("get vp register cannot fail")
             .as_u64()
@@ -1237,9 +1237,9 @@ impl<T: CpuIo, B: Backing> Arm64RegisterState for UhHypercallHandler<'_, '_, T, 
         self.vp
             .runner
             .set_vp_register(
+                self.intercepted_vtl,
                 HvArm64RegisterName(HvArm64RegisterName::X0.0 + n as u32),
                 v.into(),
-                self.intercepted_vtl,
             )
             .expect("set vp register cannot fail")
     }

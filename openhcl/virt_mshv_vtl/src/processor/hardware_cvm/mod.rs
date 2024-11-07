@@ -338,9 +338,9 @@ impl<T, B: HardwareIsolatedBacking> hv1_hypercall::SetVpRegisters
 {
     fn set_vp_registers(
         &mut self,
+        vtl: Option<Vtl>,
         partition_id: u64,
         vp_index: u32,
-        vtl: Option<Vtl>,
         registers: &[hvdef::hypercall::HvRegisterAssoc],
     ) -> hvdef::HvRepResult {
         if partition_id != hvdef::HV_PARTITION_ID_SELF {

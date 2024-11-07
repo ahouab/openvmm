@@ -395,9 +395,9 @@ impl BackingPrivate for SnpBacked {
         tracing::trace!(?notifications, "setting notifications");
         this.runner
             .set_vp_register(
+                vtl,
                 HvX64RegisterName::DeliverabilityNotifications,
                 u64::from(notifications).into(),
-                vtl,
             )
             .expect("requesting deliverability is not a fallable operation");
     }

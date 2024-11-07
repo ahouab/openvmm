@@ -56,9 +56,9 @@ impl super::BackingPrivate for MshvArm64 {
 
     fn try_set_reg(
         runner: &mut ProcessorRunner<'_, Self>,
+        _vtl: GuestVtl,
         name: HvRegisterName,
         value: HvRegisterValue,
-        _vtl: GuestVtl,
     ) -> Result<bool, super::Error> {
         // Try to set the register in the CPU context, the fastest path. Only
         // VTL-shared registers can be set this way: the CPU context only
@@ -117,8 +117,8 @@ impl super::BackingPrivate for MshvArm64 {
 
     fn try_get_reg(
         runner: &ProcessorRunner<'_, Self>,
-        name: HvRegisterName,
         _vtl: GuestVtl,
+        name: HvRegisterName,
     ) -> Result<Option<HvRegisterValue>, super::Error> {
         // Try to get the register from the CPU context, the fastest path.
         // NOTE: x18 is omitted here as it is managed by the hypervisor.
