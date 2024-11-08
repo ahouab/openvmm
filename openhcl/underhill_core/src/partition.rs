@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! Partition abstraction allowing different virtualization backends within
 //! OpenHCL.
 //!

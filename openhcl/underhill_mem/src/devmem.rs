@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // UNSAFETY: required for mapping memory to a partition.
 #![allow(unsafe_code)]
 
