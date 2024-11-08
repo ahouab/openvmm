@@ -16,6 +16,7 @@ mod inspect_proc;
 mod loader;
 mod nvme_manager;
 mod options;
+mod partition;
 mod reference_time;
 mod servicing;
 mod threadpool_vm_task_backend;
@@ -322,6 +323,7 @@ async fn launch_workers(
         halt_on_guest_halt: opt.halt_on_guest_halt,
         no_sidecar_hotplug: opt.no_sidecar_hotplug,
         gdbstub: opt.gdbstub,
+        kvm: opt.kvm,
     };
 
     let (mut remote_console_cfg, framebuffer_access) =

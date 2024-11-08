@@ -109,6 +109,10 @@ pub struct Options {
     /// (OPENHCL_NO_SIDECAR_HOTPLUG=1) Leave sidecar VPs remote even if they
     /// hit exits.
     pub no_sidecar_hotplug: bool,
+
+    /// (OPENHCL_KVM=1) Use KVM and nested virtualization to run the guest OS
+    /// instead of using the mshv_vtl driver.
+    pub kvm: bool,
 }
 
 impl Options {
@@ -176,6 +180,7 @@ impl Options {
         let no_sidecar_hotplug = parse_legacy_env_bool("OPENHCL_NO_SIDECAR_HOTPLUG");
         let gdbstub = parse_legacy_env_bool("OPENHCL_GDBSTUB");
         let gdbstub_port = parse_legacy_env_number("OPENHCL_GDBSTUB_PORT")?.map(|x| x as u32);
+        let kvm = parse_env_bool("OPENHCL_KVM");
 
         let mut args = std::env::args().chain(extra_args);
         // Skip our own filename.
@@ -228,6 +233,7 @@ impl Options {
             cvm_guest_vsm,
             halt_on_guest_halt,
             no_sidecar_hotplug,
+            kvm,
         })
     }
 

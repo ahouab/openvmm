@@ -41,6 +41,7 @@ use crate::loader::LoadKind;
 use crate::nvme_manager::NvmeDiskConfig;
 use crate::nvme_manager::NvmeDiskResolver;
 use crate::nvme_manager::NvmeManager;
+use crate::partition::OpenhclPartition;
 use crate::reference_time::ReferenceTime;
 use crate::servicing;
 use crate::servicing::transposed::OptionServicingInitState;
@@ -112,15 +113,13 @@ use tpm_resources::TpmRegisterLayout;
 use tracing::instrument;
 use tracing::Instrument;
 use uevent::UeventListener;
+use underhill_mem::AccessGuestMemory;
 use underhill_threadpool::AffinitizedThreadpool;
 use underhill_threadpool::ThreadpoolBuilder;
 use user_driver::lockmem::LockedMemorySpawner;
 use user_driver::vfio::VfioDmaBuffer;
 use virt::state::HvRegisterState;
-use virt::Partition;
 use virt::VpIndex;
-use virt::X86Partition;
-use virt_mshv_vtl::UhPartition;
 use virt_mshv_vtl::UhPartitionNewParams;
 use virt_mshv_vtl::UhProtoPartition;
 use vm_loader::initial_regs::initial_regs;
@@ -292,6 +291,8 @@ pub struct UnderhillEnvCfg {
     pub no_sidecar_hotplug: bool,
     /// Enables the GDB stub for debugging the guest.
     pub gdbstub: bool,
+    /// Use KVM instead of mshv_vtl.
+    pub kvm: bool,
 }
 
 /// Bundle of config + runtime objects for hooking into the underhill remote
@@ -719,7 +720,7 @@ impl UhVmNetworkSettings {
         uevent_listener: &UeventListener,
         servicing_netvsp_state: &Option<Vec<crate::emuplat::netvsp::SavedState>>,
         shared_vis_pages_pool: &Option<SharedPool>,
-        partition: Arc<UhPartition>,
+        partition: Arc<dyn OpenhclPartition>,
         state_units: &StateUnits,
         tp: &AffinitizedThreadpool,
         vmbus_server: &Option<VmbusServerHandle>,
@@ -849,7 +850,7 @@ impl LoadedVmNetworkSettings for UhVmNetworkSettings {
         uevent_listener: &UeventListener,
         servicing_netvsp_state: &Option<Vec<crate::emuplat::netvsp::SavedState>>,
         shared_vis_pages_pool: &Option<SharedPool>,
-        partition: Arc<UhPartition>,
+        partition: Arc<dyn OpenhclPartition>,
         state_units: &StateUnits,
         vmbus_server: &Option<VmbusServerHandle>,
     ) -> anyhow::Result<RuntimeSavedState> {
@@ -1312,7 +1313,7 @@ async fn new_underhill_vm(
     )
     .context("failed to construct the processor topology")?;
 
-    let mut with_vmbus: bool = false;
+    let mut with_vmbus: bool = env_cfg.kvm;
     let mut with_vmbus_relay = false;
     if dps.general.vmbus_redirection_enabled {
         with_vmbus = true;
@@ -1404,43 +1405,56 @@ async fn new_underhill_vm(
 
     // Construct the underhill partition instance. This contains much of the configuration of the guest deposited by
     // the host, along with additional device configuration and transports.
-    let params = UhPartitionNewParams {
-        lower_vtl_memory_layout: &mem_layout,
-        isolation,
-        topology: &processor_topology,
-        cvm_cpuid_info: runtime_params.cvm_cpuid_info(),
-        snp_secrets: runtime_params.snp_secrets(),
-        env_cvm_guest_vsm: env_cfg.cvm_guest_vsm,
-        vtom,
-        handle_synic: with_vmbus,
-        no_sidecar_hotplug: env_cfg.no_sidecar_hotplug,
-        use_mmio_hypercalls,
-        intercept_debug_exceptions: env_cfg.gdbstub,
+    let proto_partition = if env_cfg.kvm {
+        None
+    } else {
+        let params = UhPartitionNewParams {
+            lower_vtl_memory_layout: &mem_layout,
+            isolation,
+            topology: &processor_topology,
+            cvm_cpuid_info: runtime_params.cvm_cpuid_info(),
+            snp_secrets: runtime_params.snp_secrets(),
+            env_cvm_guest_vsm: env_cfg.cvm_guest_vsm,
+            vtom,
+            handle_synic: with_vmbus,
+            no_sidecar_hotplug: env_cfg.no_sidecar_hotplug,
+            use_mmio_hypercalls,
+            intercept_debug_exceptions: env_cfg.gdbstub,
+        };
+
+        let proto_partition = UhProtoPartition::new(params, |cpu| tp.driver(cpu).clone())
+            .context("failed to create prototype partition")?;
+        Some(proto_partition)
     };
 
-    let proto_partition = UhProtoPartition::new(params, |cpu| tp.driver(cpu).clone())
-        .context("failed to create prototype partition")?;
-
-    let gm = underhill_mem::init(&underhill_mem::Init {
-        tp,
-        processor_topology: &processor_topology,
-        isolation,
-        vtl0_alias_map_bit,
-        vtom,
-        mem_layout: &mem_layout,
-        complete_memory_layout: &complete_memory_layout,
-        boot_init,
-        shared_pool: &shared_pool,
-        maximum_vtl: if proto_partition.guest_vsm_available() {
-            Vtl::Vtl1
-        } else {
-            Vtl::Vtl0
-        },
-        vtl2_memory: runtime_params.vtl2_memory_map(),
-        accepted_regions: measured_vtl2_info.accepted_regions(),
-    })
-    .await
-    .context("failed to initialize memory")?;
+    let mut gm: Box<dyn AccessGuestMemory> = if let Some(proto_partition) = &proto_partition {
+        Box::new(
+            underhill_mem::init(&underhill_mem::Init {
+                tp,
+                processor_topology: &processor_topology,
+                isolation,
+                vtl0_alias_map_bit,
+                vtom,
+                mem_layout: &mem_layout,
+                complete_memory_layout: &complete_memory_layout,
+                boot_init,
+                shared_pool: &shared_pool,
+                maximum_vtl: if proto_partition.guest_vsm_available() {
+                    Vtl::Vtl1
+                } else {
+                    Vtl::Vtl0
+                },
+                vtl2_memory: runtime_params.vtl2_memory_map(),
+                accepted_regions: measured_vtl2_info.accepted_regions(),
+            })
+            .await
+            .context("failed to initialize memory")?,
+        )
+    } else {
+        // KVM configurations do not yet support the driver for full
+        // underhill_mem support, so fall back to /dev/mem.
+        Box::new(underhill_mem::DevMemMemory::new(&mem_layout)?)
+    };
 
     let shared_vis_pages_pool = if shared_pool_size != 0 {
         Some(
@@ -1611,7 +1625,7 @@ async fn new_underhill_vm(
 
     // Only advertise extended IOAPIC on non-PCAT systems.
     #[cfg(guest_arch = "x86_64")]
-    let cpuid = {
+    let mut cpuid = {
         let extended_ioapic_rte = !matches!(firmware_type, FirmwareType::Pcat);
         vmm_core::cpuid::hyperv_cpuid_leaves(extended_ioapic_rte).collect::<Vec<_>>()
     };
@@ -1637,29 +1651,142 @@ async fn new_underhill_vm(
         })
         .unwrap();
 
-    let late_params = virt_mshv_vtl::UhLateParams {
-        gm: [
-            gm.vtl0().clone(),
-            gm.vtl1().cloned().unwrap_or(GuestMemory::empty()),
-        ]
-        .into(),
-        untrusted_dma_memory: gm.untrusted_dma_memory().clone(),
-        #[cfg(guest_arch = "x86_64")]
-        cpuid,
-        crash_notification_send,
-        emulate_apic,
-        vmtime: &vmtime_source,
-        isolated_memory_protector: gm.isolated_memory_protector()?,
-        shared_vis_pages_pool: shared_vis_pages_pool.as_ref().map(|p| p.allocator()),
-    };
+    let (partition, spawn_vps): (
+        Arc<dyn OpenhclPartition>,
+        Box<
+            dyn FnOnce(
+                _,
+                _,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>>,
+        >,
+    ) = if let Some(proto_partition) = proto_partition {
+        let late_params = virt_mshv_vtl::UhLateParams {
+            gm: [
+                gm.vtl0().clone(),
+                gm.vtl1().cloned().unwrap_or(GuestMemory::empty()),
+            ]
+            .into(),
+            untrusted_dma_memory: gm.untrusted_dma_memory().clone(),
+            #[cfg(guest_arch = "x86_64")]
+            cpuid,
+            crash_notification_send,
+            emulate_apic,
+            vmtime: &vmtime_source,
+            isolated_memory_protector: gm.isolated_memory_protector()?,
+            shared_vis_pages_pool: shared_vis_pages_pool.as_ref().map(|p| p.allocator()),
+        };
 
-    let (partition, vps) = proto_partition
-        .build(late_params)
-        .instrument(tracing::info_span!("new_uh_partition"))
-        .await
+        let (partition, vps) = proto_partition
+            .build(late_params)
+            .instrument(tracing::info_span!("new_uh_partition"))
+            .await
+            .context("failed to create partition")?;
+
+        let spawn_vps = Box::new(move |vp_runners, chipset| {
+            Box::pin(crate::vp::spawn_vps(
+                tp, vps, vp_runners, chipset, isolation,
+            )) as _
+        });
+
+        (Arc::new(partition) as _, spawn_vps)
+    } else {
+        if !cfg!(feature = "virt_kvm") {
+            anyhow::bail!("not compiled with support for KVM");
+        }
+
+        let mut kvm = virt_kvm::Kvm;
+        let proto = virt::Hypervisor::new_partition(
+            &mut kvm,
+            virt::ProtoPartitionConfig {
+                processor_topology: &processor_topology,
+                hv_config: Some(virt::HvConfig {
+                    offload_enlightenments: true,
+                    allow_device_assignment: false,
+                    vtl2: None,
+                }),
+                vmtime: &vmtime_source,
+                user_mode_apic: false,
+                isolation,
+            },
+        )
+        .context("failed to create proto partition")?;
+
+        // Add in topology CPUID leaves.
+        #[cfg(guest_arch = "x86_64")]
+        vmm_core::cpuid::topology::topology_cpuid(
+            &processor_topology,
+            &|eax, ecx| virt::ProtoPartition::cpuid(&proto, eax, ecx),
+            &mut cpuid,
+        )
+        .context("failed to compute topology cpuid")?;
+
+        let (partition, vps) = virt::ProtoPartition::build(
+            proto,
+            virt::PartitionConfig {
+                mem_layout: &mem_layout,
+                guest_memory: gm.vtl0(),
+                cpuid: &cpuid,
+            },
+        )
         .context("failed to create partition")?;
 
-    let partition = Arc::new(partition);
+        let partition = Arc::new(partition);
+
+        gm.map_partition(partition.as_ref())
+            .context("failed to map partition")?;
+
+        // virt_kvm is not currently compatible with using the thread pool, so
+        // spawn a thread for each VP.
+        let p = partition.clone();
+        let spawn_vps = Box::new(
+            move |vp_runners: Vec<vmm_core::partition_unit::VpRunner>,
+                  chipset: &vmm_core::vmotherboard_adapter::ChipsetPlusSynic| {
+                let chipset = chipset.clone();
+                Box::pin(async move {
+                    futures::future::try_join_all(vps.into_iter().zip(vp_runners).enumerate().map(
+                        |(vp_index, (mut vp, mut runner))| {
+                            let partition = p.clone().into_request_yield();
+                            let chipset = chipset.clone();
+                            let (send, recv) = mesh::oneshot();
+                            std::thread::Builder::new()
+                                .name(format!("vp-{}", vp_index))
+                                .spawn(move || match virt::BindProcessor::bind(&mut vp) {
+                                    Ok(vp) => {
+                                        send.send(Ok(()));
+                                        vmm_core::partition_unit::block_on_vp(
+                                            partition,
+                                            VpIndex::new(vp_index as u32),
+                                            async {
+                                                let mut vp = crate::partition::NoSaveVp(vp);
+                                                while let Err(_) =
+                                                    runner.run(&mut vp, &chipset).await
+                                                {
+                                                }
+                                            },
+                                        )
+                                    }
+                                    Err(err) => {
+                                        send.send(Err(err));
+                                    }
+                                })
+                                .unwrap();
+
+                            async move {
+                                recv.await
+                                    .unwrap()
+                                    .with_context(|| format!("failed to bind vp {vp_index}"))
+                            }
+                        },
+                    ))
+                    .await
+                    .map(drop)
+                }) as _
+            },
+        );
+
+        (partition, spawn_vps)
+    };
 
     // By default, scale the max QD by the number of VPs to save memory
     // on smaller VMs, up to a QD of 256.
@@ -1719,7 +1846,9 @@ async fn new_underhill_vm(
 
     // ARM64 always bounces, as the OpenHCL kernel does not
     // have access to VTL0 pages. Necessary until #273 is resolved.
-    let always_bounce = cfg!(guest_arch = "aarch64");
+    //
+    // KVM always bounces because its memory is not registered with the kernel.
+    let always_bounce = cfg!(guest_arch = "aarch64") || env_cfg.kvm;
     resolver.add_async_resolver::<DiskHandleKind, _, OpenBlockDeviceConfig, _>(
         BlockDeviceResolver::new(
             Arc::new(tp.clone()),
@@ -2086,7 +2215,7 @@ async fn new_underhill_vm(
 
     let emuplat_adjust_gpa_range;
 
-    let synic = Arc::new(SynicPorts::new(partition.clone()));
+    let synic = Arc::new(SynicPorts::new(partition.clone().into_synic()));
 
     let mut chipset = vm_manifest_builder::VmManifestBuilder::new(
         match firmware_type {
@@ -2462,10 +2591,7 @@ async fn new_underhill_vm(
         0..=1,
         0,
         "bsp",
-        Arc::new(virt::irqcon::ApicLintLineTarget::new(
-            partition.clone(),
-            Vtl::Vtl0,
-        )),
+        partition.clone().into_lint_target(Vtl::Vtl0),
     );
 
     // Add the GIC.
@@ -2628,7 +2754,7 @@ async fn new_underhill_vm(
         nics: Vec::new(),
         vf_managers: HashMap::new(),
         get_client: get_client.clone(),
-        vp_count: vps.len(),
+        vp_count: processor_topology.vp_count() as usize,
     };
     let mut netvsp_state = Vec::with_capacity(controllers.mana.len());
     if !controllers.mana.is_empty() {
@@ -2707,7 +2833,7 @@ async fn new_underhill_vm(
 
         let shutdown_guest = SimpleVmbusClientDeviceWrapper::new(
             driver_source.simple(),
-            partition.clone(),
+            partition.clone().into_vtl_memory_protection(),
             shutdown_guest,
         )?;
         vmbus_intercept_devices
@@ -2774,7 +2900,7 @@ async fn new_underhill_vm(
     .context("failed to create partition unit")?;
 
     // Start the VP tasks on the thread pool.
-    crate::vp::spawn_vps(tp, vps, vp_runners, &chipset, isolation)
+    spawn_vps(vp_runners, &chipset)
         .await
         .context("failed to spawn vps")?;
 
@@ -2786,7 +2912,7 @@ async fn new_underhill_vm(
             &processor_topology,
             &vtl0_memory_map,
             &mut partition_unit,
-            &partition,
+            partition.as_ref(),
             env_cfg.cmdline_append.as_deref(),
             vtl0_info,
             &runtime_params,
@@ -3071,7 +3197,7 @@ async fn load_firmware(
     processor_topology: &ProcessorTopology,
     vtl0_memory_map: &[(MemoryRangeWithNode, MemoryMapEntryType)],
     partition_unit: &mut PartitionUnit,
-    partition: &UhPartition,
+    partition: &dyn OpenhclPartition,
     cmdline_append: Option<&str>,
     vtl0_info: MeasuredVtl0Info,
     runtime_params: &RuntimeParameters,
@@ -3130,7 +3256,7 @@ async fn load_firmware(
 }
 
 pub struct UnderhillPmTimerAssist {
-    pub partition: std::sync::Weak<UhPartition>,
+    pub partition: std::sync::Weak<dyn OpenhclPartition>,
 }
 
 impl chipset::pm::PmTimerAssist for UnderhillPmTimerAssist {
@@ -3138,7 +3264,7 @@ impl chipset::pm::PmTimerAssist for UnderhillPmTimerAssist {
         if let Some(partition) = self.partition.upgrade() {
             if let Err(err) = partition.set_pm_timer_assist(port) {
                 tracing::warn!(
-                    error = &err as &dyn std::error::Error,
+                    error = err.as_ref() as &dyn std::error::Error,
                     ?port,
                     "failed to set PM timer assist"
                 );
@@ -3151,7 +3277,7 @@ impl chipset::pm::PmTimerAssist for UnderhillPmTimerAssist {
 // forwarding them to the host. It needs to implement the ChipsetDevice and
 // MmioIntercept traits.
 struct FallbackMmioDevice {
-    partition: std::sync::Weak<UhPartition>,
+    partition: std::sync::Weak<dyn OpenhclPartition>,
     mmio_ranges: Vec<MemoryRange>,
 }
 
