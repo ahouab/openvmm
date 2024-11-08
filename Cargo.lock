@@ -1550,7 +1550,7 @@ dependencies = [
  "memory_range",
  "parking_lot",
  "sparse_mmap",
- "thiserror",
+ "thiserror 2.0.0",
  "user_driver",
 ]
 
