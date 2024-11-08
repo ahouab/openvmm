@@ -1703,20 +1703,19 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
     #[cfg(guest_arch = "x86_64")]
     fn is_kernel_managed(&self, name: HvX64RegisterName) -> bool {
         if name == HvX64RegisterName::Xfem {
-            if self.hcl.isolation() == IsolationType::Tdx {
-                return true;
-            }
+            self.hcl.isolation == IsolationType::Tdx
+        } else if name == HvX64RegisterName::Dr6 {
+            self.hcl.dr6_shared()
+        } else {
+            is_vtl_shared_mtrr(name)
+                || matches!(
+                    name,
+                    HvX64RegisterName::Dr0
+                        | HvX64RegisterName::Dr1
+                        | HvX64RegisterName::Dr2
+                        | HvX64RegisterName::Dr3
+                )
         }
-
-        is_vtl_shared_mtrr(name)
-            || matches!(
-                name,
-                HvX64RegisterName::Dr0
-                    | HvX64RegisterName::Dr1
-                    | HvX64RegisterName::Dr2
-                    | HvX64RegisterName::Dr3
-                    | HvX64RegisterName::Dr6
-            )
     }
 
     #[cfg(guest_arch = "aarch64")]

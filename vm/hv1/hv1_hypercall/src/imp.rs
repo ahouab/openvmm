@@ -487,9 +487,9 @@ pub trait SetVpRegisters {
     /// Sets the requested registers.
     fn set_vp_registers(
         &mut self,
-        vtl: Option<Vtl>,
         partition_id: u64,
         vp_index: u32,
+        vtl: Option<Vtl>,
         registers: &[HvRegisterAssoc],
     ) -> HvRepResult;
 }
@@ -498,9 +498,9 @@ impl<T: SetVpRegisters> HypercallDispatch<HvSetVpRegisters> for T {
     fn dispatch(&mut self, params: HypercallParameters<'_>) -> HvResult<()> {
         let (header, input, _, elements_processed) = HvSetVpRegisters::parse(params);
         self.set_vp_registers(
-            header.target_vtl.target_vtl()?,
             header.partition_id,
             header.vp_index,
+            header.target_vtl.target_vtl()?,
             input,
         )
         .map_to_hypercall_result(input.len(), elements_processed)
