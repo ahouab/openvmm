@@ -276,8 +276,9 @@ impl user_driver::vfio::VfioDmaBuffer for SharedPoolAllocator {
         }))
     }
 
-    // Restore for shared pool just calls regular allocate.
+    /// Restore pool allocation from saved PFNs.
     fn restore_dma_buffer(&self, len: usize, _pfns: &[u64]) -> anyhow::Result<MemoryBlock> {
+        // Restore is not yet supported for shared pool, just call regular create.
         self.create_dma_buffer(len)
     }
 }
