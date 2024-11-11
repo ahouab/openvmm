@@ -142,6 +142,7 @@ impl BackingPrivate for HypervisorBackedArm64 {
             tracing::trace!(?notifications, "setting notifications");
             this.runner
                 .set_vp_register(
+                    // TODO GUEST VSM
                     GuestVtl::Vtl0,
                     VpRegisterName::DeliverabilityNotifications,
                     u64::from(notifications).into(),

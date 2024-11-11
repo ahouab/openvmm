@@ -2146,12 +2146,14 @@ mod save_restore {
             };
 
             self.runner
+                // TODO GUEST VSM: Does dr6 need special handling?
                 .get_vp_registers(GuestVtl::Vtl0, &SHARED_REGISTERS[..len], &mut values[..len])
                 .context("failed to get shared registers")
                 .map_err(SaveError::Other)?;
 
             let startup_suspend = match self
                 .runner
+                // TODO GUEST VSM
                 .get_vp_register(GuestVtl::Vtl0, HvX64RegisterName::InternalActivityState)
             {
                 Ok(val) => Some(HvInternalActivityRegister::from(val.as_u64()).startup_suspend()),
@@ -2285,6 +2287,7 @@ mod save_restore {
                     ];
                     let mut values = [FromZeroes::new_zeroed(); NAMES.len()];
                     self.runner
+                        // TODO GUEST VSM
                         .get_vp_registers(GuestVtl::Vtl0, &NAMES, &mut values)
                         .context("failed to get VP registers for startup suspend log")
                         .map_err(RestoreError::Other)?;
@@ -2307,6 +2310,7 @@ mod save_restore {
             if inject_startup_suspend {
                 let reg = u64::from(HvInternalActivityRegister::new().with_startup_suspend(true));
                 let result = self.runner.set_vp_registers(
+                    // TODO GUEST VSM
                     GuestVtl::Vtl0,
                     [(HvX64RegisterName::InternalActivityState, reg)],
                 );
