@@ -4,12 +4,13 @@
 //! Implementation of an admin or IO queue pair.
 
 use super::spec;
+use crate::driver::save_restore::PendingCommandsSavedState;
+use crate::driver::save_restore::QueuePairSavedState;
 use crate::page_allocator::PageAllocator;
 use crate::page_allocator::ScopedPages;
 use crate::queues::CompletionQueue;
 use crate::queues::SubmissionQueue;
 use crate::registers::DeviceRegisters;
-use anyhow::Context;
 use futures::StreamExt;
 use guestmem::ranges::PagedRange;
 use guestmem::GuestMemory;
@@ -110,40 +111,133 @@ impl PendingCommands {
         );
         command.respond
     }
+
+    /// Save pending commands into a buffer.
+    pub fn save(&self) -> PendingCommandsSavedState {
+        let mut commands = Vec::new();
+        // Convert Slab into Vec.
+        for cmd in &self.commands {
+            commands.push(cmd.1.command);
+        }
+        PendingCommandsSavedState {
+            commands,
+            next_cid_high_bits: self.next_cid_high_bits.0,
+        }
+    }
+
+    /// Restore pending commands from the saved state.
+    pub fn restore(&mut self, saved_state: &PendingCommandsSavedState) -> anyhow::Result<()> {
+        let mut commands: Vec<(usize, PendingCommand)> = Vec::new();
+        for cmd in &saved_state.commands {
+            let (send, mut _recv) = mesh::oneshot::<nvme_spec::Completion>();
+            let pending_command = PendingCommand {
+                command: *cmd,
+                respond: send,
+            };
+            // Remove high CID bits to be used as a key.
+            let cid = cmd.cdw0.cid() & Self::CID_KEY_MASK;
+            commands.push((cid as usize, pending_command));
+        }
+        // Re-create identical Slab where CIDs are correctly mapped.
+        self.commands = commands.into_iter().collect::<Slab<PendingCommand>>();
+        self.next_cid_high_bits = Wrapping(saved_state.next_cid_high_bits);
+
+        Ok(())
+    }
 }
 
 impl QueuePair {
     pub const MAX_SQSIZE: u16 = (PAGE_SIZE / 64) as u16; // Maximum SQ size in entries.
     pub const MAX_CQSIZE: u16 = (PAGE_SIZE / 16) as u16; // Maximum CQ size in entries.
 
+    /// Return size in bytes for Submission Queue.
+    fn sq_size() -> usize {
+        PAGE_SIZE
+    }
+
+    /// Return size in bytes for Completion Queue.
+    fn cq_size() -> usize {
+        PAGE_SIZE
+    }
+
+    /// Return size in bytes for DMA memory.
+    fn dma_data_size() -> usize {
+        const PER_QUEUE_PAGES: usize = 128;
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = assert!(
+            PER_QUEUE_PAGES * PAGE_SIZE >= 128 * 1024 + PAGE_SIZE,
+            "not enough room for an ATAPI IO plus a PRP list"
+        );
+
+        PER_QUEUE_PAGES * PAGE_SIZE
+    }
+
+    /// Return total DMA buffer size needed for the queue pair (all chunks are contiguous).
+    pub fn required_dma_size() -> usize {
+        // 4k for SQ + 4k for CQ + 512k for data.
+        QueuePair::sq_size() + QueuePair::cq_size() + QueuePair::dma_data_size()
+    }
+
     pub fn new(
         spawner: impl SpawnDriver,
         device: &impl DeviceBacking,
         qid: u16,
-        sq_size: u16,
-        cq_size: u16,
-        mut interrupt: DeviceInterrupt,
+        sq_size: u16, // Requested SQ size in entries.
+        cq_size: u16, // Requested CQ size in entries.
+        interrupt: DeviceInterrupt,
         registers: Arc<DeviceRegisters<impl DeviceBacking>>,
     ) -> anyhow::Result<Self> {
-        let mem = device
+        let mem_block = device
             .host_allocator()
-            .allocate_dma_buffer(PAGE_SIZE * 2)
-            .context("failed to allocate memory for queues")?;
+            .allocate_dma_buffer(QueuePair::required_dma_size())?;
 
+        let (queue_handler, alloc, mem) = QueuePair::allocate(qid, sq_size, cq_size, mem_block)?;
+
+        QueuePair::resume(spawner, interrupt, registers, mem, alloc, queue_handler)
+    }
+
+    /// Part of QueuePair initialization sequence which does memory allocations.
+    fn allocate(
+        qid: u16,
+        sq_size: u16,
+        cq_size: u16,
+        mem_block: MemoryBlock,
+    ) -> anyhow::Result<(QueueHandler, PageAllocator, MemoryBlock)> {
         assert!(sq_size <= Self::MAX_SQSIZE);
         assert!(cq_size <= Self::MAX_CQSIZE);
 
-        let sq = SubmissionQueue::new(qid, sq_size, mem.subblock(0, PAGE_SIZE));
-        let cq = CompletionQueue::new(qid, cq_size, mem.subblock(PAGE_SIZE, PAGE_SIZE));
+        // The memory block is split contiguously: SQ, CQ, Data.
+        let sq = SubmissionQueue::new(qid, sq_size, mem_block.subblock(0, Self::sq_size()));
+        let cq = CompletionQueue::new(
+            qid,
+            cq_size,
+            mem_block.subblock(Self::sq_size(), Self::cq_size()),
+        );
+        let alloc: PageAllocator = PageAllocator::new(
+            mem_block.subblock(Self::sq_size() + Self::cq_size(), Self::dma_data_size()),
+        );
 
-        let (send, recv) = mesh::channel();
-        let (mut ctx, cancel) = CancelContext::new().with_cancel();
-        let mut queue_handler = QueueHandler {
+        let queue_handler = QueueHandler {
             sq,
             cq,
             commands: PendingCommands::new(),
             stats: Default::default(),
         };
+
+        Ok((queue_handler, alloc, mem_block))
+    }
+
+    /// Part of QueuePair initialization sequence which resumes operations.
+    fn resume(
+        spawner: impl SpawnDriver,
+        mut interrupt: DeviceInterrupt,
+        registers: Arc<DeviceRegisters<impl DeviceBacking>>,
+        mem_block: MemoryBlock,
+        alloc: PageAllocator,
+        mut queue_handler: QueueHandler,
+    ) -> anyhow::Result<Self> {
+        let (send, recv) = mesh::channel();
+        let (mut ctx, cancel) = CancelContext::new().with_cancel();
         let task = spawner.spawn("nvme-queue", {
             async move {
                 ctx.until_cancelled(async {
@@ -155,24 +249,11 @@ impl QueuePair {
             }
         });
 
-        const PER_QUEUE_PAGES: usize = 128;
-        #[allow(clippy::assertions_on_constants)]
-        const _: () = assert!(
-            PER_QUEUE_PAGES * PAGE_SIZE >= 128 * 1024 + PAGE_SIZE,
-            "not enough room for an ATAPI IO plus a PRP list"
-        );
-        let alloc = PageAllocator::new(
-            device
-                .host_allocator()
-                .allocate_dma_buffer(PER_QUEUE_PAGES * PAGE_SIZE)
-                .context("failed to allocate pages for queue requests")?,
-        );
-
         Ok(Self {
             task,
             cancel,
             issuer: Arc::new(Issuer { send, alloc }),
-            mem,
+            mem: mem_block,
         })
     }
 
@@ -191,6 +272,39 @@ impl QueuePair {
     pub async fn shutdown(mut self) -> impl Send {
         self.cancel.cancel();
         self.task.await
+    }
+
+    /// Save queue pair state for servicing.
+    pub async fn save(&self) -> anyhow::Result<QueuePairSavedState> {
+        // Send an RPC request to QueueHandler thread to save its data.
+        let queue_data = self.issuer.send.call(Req::Save, ()).await?;
+
+        // Add more data to the returned response.
+        let mut local_queue_data = queue_data.unwrap();
+        local_queue_data.mem_len = self.mem.len();
+        local_queue_data.pfns = self.mem.pfns().to_vec();
+
+        Ok(local_queue_data)
+    }
+
+    /// Restore queue pair state after servicing. Returns newly created object from saved data.
+    pub fn restore(
+        spawner: impl SpawnDriver,
+        interrupt: DeviceInterrupt,
+        registers: Arc<DeviceRegisters<impl DeviceBacking>>,
+        mem_block: MemoryBlock,
+        saved_state: &QueuePairSavedState,
+    ) -> anyhow::Result<Self> {
+        let (mut queue_handler, alloc, mem) = QueuePair::allocate(
+            saved_state.sq_state.sqid,
+            saved_state.sq_state.len as u16,
+            saved_state.cq_state.len as u16,
+            mem_block,
+        )?;
+
+        queue_handler.restore(saved_state)?;
+
+        QueuePair::resume(spawner, interrupt, registers, mem, alloc, queue_handler)
     }
 }
 
@@ -448,6 +562,7 @@ struct PendingCommand {
 enum Req {
     Command(Rpc<spec::Command, spec::Completion>),
     Inspect(inspect::Deferred),
+    Save(Rpc<(), Result<QueuePairSavedState, anyhow::Error>>),
 }
 
 #[derive(Inspect)]
@@ -507,6 +622,9 @@ impl QueueHandler {
                         self.stats.issued.increment();
                     }
                     Req::Inspect(deferred) => deferred.inspect(&self),
+                    Req::Save(queue_state) => {
+                        queue_state.complete(self.save().await);
+                    }
                 },
                 Event::Completion(completion) => {
                     assert_eq!(completion.sqid, self.sq.id());
@@ -517,6 +635,29 @@ impl QueueHandler {
                 }
             }
         }
+    }
+
+    /// Save queue data for servicing.
+    pub async fn save(&self) -> anyhow::Result<QueuePairSavedState> {
+        // The data is collected from both QueuePair and QueueHandler.
+        Ok(QueuePairSavedState {
+            sq_state: self.sq.save(),
+            cq_state: self.cq.save(),
+            pending_cmds: self.commands.save(),
+            cpu: 0,       // Will be updated by the caller.
+            msix: 0,      // Will be updated by the caller.
+            mem_len: 0,   // Will be updated by the caller.
+            pfns: vec![], // Will be updated by the caller.
+        })
+    }
+
+    /// Restore queue data after servicing.
+    pub fn restore(&mut self, saved_state: &QueuePairSavedState) -> anyhow::Result<()> {
+        self.commands.restore(&saved_state.pending_cmds)?;
+        self.sq.restore(&saved_state.sq_state)?;
+        self.cq.restore(&saved_state.cq_state)?;
+
+        Ok(())
     }
 }
 

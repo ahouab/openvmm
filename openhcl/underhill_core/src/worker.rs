@@ -58,6 +58,7 @@ use debug_ptr::DebugPtr;
 use disk_blockdevice::BlockDeviceResolver;
 use disk_blockdevice::OpenBlockDeviceConfig;
 use firmware_uefi::UefiCommandSet;
+use fixed_pool_alloc::FixedPool;
 use futures::executor::block_on;
 use futures::future::join_all;
 use futures_concurrency::future::Race;
@@ -740,7 +741,7 @@ impl UhVmNetworkSettings {
             vps_count as u32,
             nic_max_sub_channels,
             servicing_netvsp_state,
-            vfio_dma_buffer(shared_vis_pages_pool),
+            vfio_dma_buffer(shared_vis_pages_pool, None),
         )
         .await?;
 
@@ -1059,11 +1060,22 @@ fn round_up_to_2mb(bytes: u64) -> u64 {
     (bytes + (2 * 1024 * 1024) - 1) & !((2 * 1024 * 1024) - 1)
 }
 
-fn vfio_dma_buffer(shared_vis_pages_pool: &Option<SharedPool>) -> Arc<dyn VfioDmaBuffer> {
+/// Return appropriate allocator in the following order:
+///  - use SharedPoolAllocator if shared_vis_page_pool is provided.
+///  - use FixedPoolAllocator if fixed_mem_range is provided.
+///  - use LockedMemorySpawner in all other cases.
+fn vfio_dma_buffer(
+    shared_vis_pages_pool: &Option<SharedPool>,
+    fixed_mem_pool: Option<&FixedPool>,
+) -> Arc<dyn VfioDmaBuffer> {
     shared_vis_pages_pool
         .as_ref()
         .map(|p| -> Arc<dyn VfioDmaBuffer> { Arc::new(p.allocator()) })
-        .unwrap_or(Arc::new(LockedMemorySpawner))
+        .unwrap_or(
+            fixed_mem_pool
+                .map(|f| -> Arc<dyn VfioDmaBuffer> { Arc::new(f.allocator()) })
+                .unwrap_or(Arc::new(LockedMemorySpawner)),
+        )
 }
 
 #[cfg_attr(guest_arch = "aarch64", allow(dead_code))]
@@ -1416,6 +1428,7 @@ async fn new_underhill_vm(
         no_sidecar_hotplug: env_cfg.no_sidecar_hotplug,
         use_mmio_hypercalls,
         intercept_debug_exceptions: env_cfg.gdbstub,
+        dma_pages_pool: None,
     };
 
     let proto_partition = UhProtoPartition::new(params, |cpu| tp.driver(cpu).clone())
@@ -1651,6 +1664,7 @@ async fn new_underhill_vm(
         vmtime: &vmtime_source,
         isolated_memory_protector: gm.isolated_memory_protector()?,
         shared_vis_pages_pool: shared_vis_pages_pool.as_ref().map(|p| p.allocator()),
+        dma_pages_pool: None,
     };
 
     let (partition, vps) = proto_partition
@@ -1734,11 +1748,24 @@ async fn new_underhill_vm(
         crate::inspect_proc::periodic_telemetry_task(driver_source.simple()),
     );
 
+    // Allocate fixed pool for DMA-capable devices if size hint was provided by host,
+    // otherwise use default heap allocator.
+    // Contents of fixed pool will be preserved during servicing.
+    let fixed_mem_pool = if !runtime_params.dma_preserve_memory_map().is_empty() {
+        let pools = runtime_params.dma_preserve_memory_map();
+        Some(FixedPool::new(pools)?)
+    } else {
+        None
+    };
+
     let nvme_manager = if env_cfg.nvme_vfio {
+        let nvme_keepalive = fixed_mem_pool.is_some();
         let manager = NvmeManager::new(
             &driver_source,
             processor_topology.vp_count(),
-            vfio_dma_buffer(&shared_vis_pages_pool),
+            vfio_dma_buffer(&shared_vis_pages_pool, fixed_mem_pool.as_ref()),
+            nvme_keepalive,
+            servicing_state.nvme_state.unwrap_or(None),
         );
 
         resolver.add_async_resolver::<DiskHandleKind, _, NvmeDiskConfig, _>(NvmeDiskResolver::new(

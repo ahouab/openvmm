@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::queue_pair::QueuePair;
 use crate::NvmeDriver;
 use chipset_device::mmio::ExternallyManagedMmioIntercepts;
 use disk_ramdisk::RamDisk;
@@ -20,8 +21,12 @@ use vmcore::vm_task::VmTaskDriverSource;
 
 #[async_test]
 async fn test_nvme_driver(driver: DefaultDriver) {
+    const MSIX_COUNT: u16 = 2;
+    const IO_QUEUE_COUNT: u16 = 64;
+    const CPU_COUNT: u32 = 64;
+
     let base_len = 64 << 20;
-    let payload_len = 1 << 20;
+    let payload_len = QueuePair::required_dma_size() * 4;
     let mem = DeviceSharedMemory::new(base_len, payload_len);
     let payload_mem = mem
         .guest_memory()
@@ -38,8 +43,8 @@ async fn test_nvme_driver(driver: DefaultDriver) {
         &mut msi_set,
         &mut ExternallyManagedMmioIntercepts,
         NvmeControllerCaps {
-            msix_count: 2,
-            max_io_queues: 64,
+            msix_count: MSIX_COUNT,
+            max_io_queues: IO_QUEUE_COUNT,
             subsystem_id: Guid::new_random(),
         },
     );
@@ -50,7 +55,9 @@ async fn test_nvme_driver(driver: DefaultDriver) {
 
     let device = EmulatedDevice::new(nvme, msi_set, mem);
 
-    let driver = NvmeDriver::new(&driver_source, 64, device).await.unwrap();
+    let mut driver = NvmeDriver::new(&driver_source, CPU_COUNT, device)
+        .await
+        .unwrap();
 
     let namespace = driver.namespace(1).await.unwrap();
 
@@ -125,4 +132,63 @@ async fn test_nvme_driver(driver: DefaultDriver) {
     assert!(v[1024..].iter().all(|&x| x == 0));
 
     driver.shutdown().await;
+}
+
+#[async_test]
+async fn test_nvme_save_restore(driver: DefaultDriver) {
+    const MSIX_COUNT: u16 = 2;
+    const IO_QUEUE_COUNT: u16 = 64;
+    const CPU_COUNT: u32 = 64;
+
+    let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
+    let payload_len = QueuePair::required_dma_size() * 4;
+    let emu_mem = DeviceSharedMemory::new(64 * 1024 * 1024, payload_len);
+    let mut msi_x = MsiInterruptSet::new();
+    let nvme_ctrl = nvme::NvmeController::new(
+        &driver_source,
+        emu_mem.guest_memory().clone(),
+        &mut msi_x,
+        &mut ExternallyManagedMmioIntercepts,
+        NvmeControllerCaps {
+            msix_count: MSIX_COUNT,
+            max_io_queues: IO_QUEUE_COUNT,
+            subsystem_id: Guid::default(),
+        },
+    );
+
+    // Add a namespace so Identify Namespace command will succeed later.
+    nvme_ctrl
+        .client()
+        .add_namespace(1, Arc::new(RamDisk::new(1024 * 1024, false).unwrap()))
+        .await
+        .unwrap();
+    let device = EmulatedDevice::new(nvme_ctrl, msi_x, emu_mem);
+
+    let mut nvme_driver = NvmeDriver::new(&driver_source, CPU_COUNT, device)
+        .await
+        .unwrap();
+
+    let _ns1 = nvme_driver.namespace(1).await.unwrap();
+    let saved_state = nvme_driver.save().await.unwrap();
+    assert_eq!(saved_state.namespace.len(), 1);
+    assert_eq!(saved_state.namespace[0].nsid, 1);
+
+    // Create a second set of devices since the ownership has been moved.
+    let new_emu_mem = DeviceSharedMemory::new(64 * 1024 * 1024, payload_len);
+    let mut new_msi_x = MsiInterruptSet::new();
+    let new_nvme_ctrl = nvme::NvmeController::new(
+        &driver_source,
+        new_emu_mem.guest_memory().clone(),
+        &mut new_msi_x,
+        &mut ExternallyManagedMmioIntercepts,
+        NvmeControllerCaps {
+            msix_count: MSIX_COUNT,
+            max_io_queues: IO_QUEUE_COUNT,
+            subsystem_id: Guid::default(),
+        },
+    );
+    let new_device = EmulatedDevice::new(new_nvme_ctrl, new_msi_x, new_emu_mem);
+    let _new_nvme_driver = NvmeDriver::restore(&driver_source, CPU_COUNT, new_device, &saved_state)
+        .await
+        .unwrap();
 }

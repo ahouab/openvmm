@@ -247,6 +247,25 @@ impl HostDmaAllocator for EmulatedDmaAllocator {
             self.shared_mem.alloc(len).context("out of memory")?,
         ))
     }
+
+    fn attach_dma_buffer(&self, len: usize, _pfns: &[u64]) -> anyhow::Result<MemoryBlock> {
+        // For emulated allocator (unit tests) reuse the regular alloc.
+        self.allocate_dma_buffer(len)
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(feature = "vfio")]
+impl crate::vfio::VfioDmaBuffer for EmulatedDmaAllocator {
+    fn create_dma_buffer(&self, len: usize) -> anyhow::Result<MemoryBlock> {
+        Ok(MemoryBlock::new(
+            self.shared_mem.alloc(len).context("out of memory")?,
+        ))
+    }
+
+    fn restore_dma_buffer(&self, len: usize, _pfns: &[u64]) -> anyhow::Result<MemoryBlock> {
+        self.create_dma_buffer(len)
+    }
 }
 
 impl<T: 'static + Send + InspectMut + MmioIntercept> DeviceBacking for EmulatedDevice<T> {
@@ -316,5 +335,9 @@ impl<T: MmioIntercept + Send> DeviceRegisterIo for Mapping<T> {
             .lock()
             .mmio_write(self.addr + offset as u64, &data.to_ne_bytes())
             .unwrap();
+    }
+
+    fn base_va(&self) -> u64 {
+        self.addr
     }
 }

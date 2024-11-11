@@ -4,6 +4,7 @@
 //! Provides access to NVMe namespaces that are backed by the user-mode NVMe
 //! VFIO driver. Keeps track of all the NVMe drivers.
 
+use crate::servicing::NvmeSavedState;
 use anyhow::Context;
 use async_trait::async_trait;
 use disk_backend::resolve::ResolveDiskParameters;
@@ -12,6 +13,7 @@ use futures::future::join_all;
 use futures::StreamExt;
 use futures::TryFutureExt;
 use inspect::Inspect;
+use mesh::payload::Protobuf;
 use mesh::rpc::Rpc;
 use mesh::rpc::RpcSend;
 use mesh::MeshPayload;
@@ -28,6 +30,7 @@ use vm_resource::kind::DiskHandleKind;
 use vm_resource::AsyncResolveResource;
 use vm_resource::ResourceId;
 use vm_resource::ResourceResolver;
+use vmcore::save_restore::SavedStateRoot;
 use vmcore::vm_task::VmTaskDriverSource;
 
 #[derive(Debug, Error)]
@@ -52,10 +55,19 @@ enum InnerError {
     },
 }
 
+/// Save/restore errors.
+#[derive(Debug, Error)]
+pub enum SaveRestoreError {
+    #[error("save explicitly disabled")]
+    ExplicitlyDisabled,
+}
+
 #[derive(Debug)]
 pub struct NvmeManager {
     task: Task<()>,
     client: NvmeManagerClient,
+    /// Flags controlling servicing behavior.
+    nvme_keepalive: bool,
 }
 
 impl Inspect for NvmeManager {
@@ -83,6 +95,8 @@ impl NvmeManager {
         driver_source: &VmTaskDriverSource,
         vp_count: u32,
         dma_buffer: Arc<dyn VfioDmaBuffer>,
+        nvme_keepalive: bool,
+        saved_state: Option<NvmeSavedState>,
     ) -> Self {
         let (send, recv) = mesh::channel();
         let driver = driver_source.simple();
@@ -90,14 +104,24 @@ impl NvmeManager {
             driver_source: driver_source.clone(),
             devices: HashMap::new(),
             vp_count,
-            dma_buffer,
+            dma_buffer: dma_buffer.clone(),
+            nvme_keepalive,
         };
-        let task = driver.spawn("nvme-manager", async move { worker.run(recv).await });
+        let task = driver.spawn("nvme-manager", async move {
+            // Restore saved data (if present) before async worker thread runs.
+            if saved_state.is_some() {
+                let _ = NvmeManager::restore(&mut worker, saved_state.as_ref().unwrap())
+                    .instrument(tracing::info_span!("nvme_manager_restore"))
+                    .await;
+            };
+            worker.run(recv).await
+        });
         Self {
             task,
             client: NvmeManagerClient {
                 sender: Arc::new(send),
             },
+            nvme_keepalive,
         }
     }
 
@@ -105,27 +129,61 @@ impl NvmeManager {
         &self.client
     }
 
-    pub async fn shutdown(self, nvme_keepalive: bool) {
+    pub async fn shutdown(self) {
+        // Early return is faster way to skip shutdown.
+        // but we need to thoroughly test the data integrity.
         //
-        // Early return would be the fastest way to skip shutdown.
-        // Unfortunately, then there is no good way to prevent
-        // controller reset in the drop() fn if we early return here.
+        // TODO: Enable this when approved.
         //
-        // TODO: Figure out how to uncomment this. Maybe just don't reset the ctrl in drop().
-        //
-        // if nvme_keepalive == true { return }
+        // if self.nvme_keepalive { return }
         self.client.sender.send(Request::Shutdown {
             span: tracing::info_span!("shutdown_nvme_manager"),
-            nvme_keepalive,
+            nvme_keepalive: self.nvme_keepalive,
         });
         self.task.await;
+    }
+
+    /// Save NVMe manager's state during servicing.
+    pub async fn save(&self) -> anyhow::Result<NvmeManagerSavedState> {
+        // NVMe manager has no own data to save, everything will be done
+        // in the Worker task which can be contacted through Client.
+        if self.nvme_keepalive {
+            self.client().save().await
+        } else {
+            // If nvme_keepalive was explicitly disabled,
+            // return an error which is non-fatal indication
+            // that there is no save data.
+            Err(anyhow::Error::from(SaveRestoreError::ExplicitlyDisabled {}))
+        }
+    }
+
+    /// Restore NVMe manager's state after servicing.
+    async fn restore(
+        worker: &mut NvmeManagerWorker,
+        saved_state: &NvmeSavedState,
+    ) -> anyhow::Result<()> {
+        let dma_buffer = worker.dma_buffer.clone();
+        worker
+            .restore(dma_buffer, &saved_state.nvme_state)
+            .instrument(tracing::info_span!("nvme_worker_restore"))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Override (explicitly disable) the default behavior.
+    pub fn override_nvme_keepalive_flag(&mut self, nvme_keepalive: bool) {
+        self.nvme_keepalive = nvme_keepalive;
     }
 }
 
 enum Request {
     Inspect(inspect::Deferred),
     ForceLoadDriver(inspect::DeferredUpdate),
-    GetNamespace(Rpc<(String, u32, tracing::Span), Result<nvme_driver::Namespace, NamespaceError>>),
+    GetNamespace(
+        Rpc<(String, u32, tracing::Span), Result<Arc<nvme_driver::Namespace>, NamespaceError>>,
+    ),
+    Save(Rpc<(), Result<NvmeManagerSavedState, anyhow::Error>>),
     Shutdown {
         span: tracing::Span,
         nvme_keepalive: bool,
@@ -142,7 +200,7 @@ impl NvmeManagerClient {
         &self,
         pci_id: String,
         nsid: u32,
-    ) -> anyhow::Result<nvme_driver::Namespace> {
+    ) -> anyhow::Result<Arc<nvme_driver::Namespace>> {
         Ok(self
             .sender
             .call(
@@ -156,6 +214,11 @@ impl NvmeManagerClient {
             .await
             .context("nvme manager is shut down")??)
     }
+
+    /// Send an RPC call to save NVMe worker data.
+    pub async fn save(&self) -> anyhow::Result<NvmeManagerSavedState> {
+        self.sender.call(Request::Save, ()).await?
+    }
 }
 
 #[derive(Inspect)]
@@ -167,6 +230,8 @@ struct NvmeManagerWorker {
     #[inspect(skip)]
     dma_buffer: Arc<dyn VfioDmaBuffer>,
     vp_count: u32,
+    /// Bypass device shutdown.
+    nvme_keepalive: bool,
 }
 
 impl NvmeManagerWorker {
@@ -196,6 +261,12 @@ impl NvmeManagerWorker {
                     })
                     .await
                 }
+                // Request to save worker data for servicing.
+                Request::Save(rpc) => {
+                    rpc.handle(|_| self.save())
+                        .instrument(tracing::info_span!("nvme_save_state"))
+                        .await
+                }
                 Request::Shutdown {
                     span,
                     nvme_keepalive,
@@ -210,6 +281,9 @@ impl NvmeManagerWorker {
             }
         };
 
+        // When nvme_keepalive flag is set then this block is unreachable
+        // because the Shutdown request is never sent.
+        //
         // Tear down all the devices if nvme_keepalive is not set.
         if !nvme_keepalive {
             async {
@@ -257,12 +331,69 @@ impl NvmeManagerWorker {
         &mut self,
         pci_id: String,
         nsid: u32,
-    ) -> Result<nvme_driver::Namespace, InnerError> {
+    ) -> Result<Arc<nvme_driver::Namespace>, InnerError> {
         let driver = self.get_driver(pci_id.to_owned()).await?;
         driver
             .namespace(nsid)
             .await
             .map_err(|source| InnerError::Namespace { nsid, source })
+    }
+
+    /// Saves NVMe device's states into buffer during servicing.
+    pub async fn save(&mut self) -> anyhow::Result<NvmeManagerSavedState> {
+        let mut nvme_disks: Vec<NvmeSavedDiskConfig> = Vec::new();
+        for (pci_id, driver) in self.devices.iter_mut() {
+            nvme_disks.push(NvmeSavedDiskConfig {
+                pci_id: pci_id.clone(),
+                driver_state: driver.save().await?,
+            });
+        }
+
+        let nvme_state = NvmeManagerSavedState {
+            cpu_count: self.vp_count,
+            nvme_disks,
+        };
+
+        // Bypass device shutdown.
+        self.nvme_keepalive = true;
+
+        Ok(nvme_state)
+    }
+
+    /// Restore NVMe manager and device states from the buffer after servicing.
+    pub async fn restore(
+        &mut self,
+        dma_buffer: Arc<dyn VfioDmaBuffer>,
+        saved_state: &NvmeManagerSavedState,
+    ) -> anyhow::Result<()> {
+        self.devices = HashMap::new();
+        for disk in &saved_state.nvme_disks {
+            let vfio_device =
+                // This code can wait on each VFIO device until it is arrived.
+                // A potential optimization would be to delay VFIO operation
+                // until it is ready, but a redesign of VfioDevice is needed.
+                VfioDevice::restore(
+                    &self.driver_source,
+                    &disk.pci_id.clone(),
+                    dma_buffer.clone(),
+                    true,
+                )
+                .instrument(tracing::info_span!("vfio_device_restore", pci_id = disk.pci_id.clone()))
+                .await?;
+
+            let nvme_driver = nvme_driver::NvmeDriver::restore(
+                &self.driver_source,
+                saved_state.cpu_count,
+                vfio_device,
+                &disk.driver_state,
+            )
+            .instrument(tracing::info_span!("nvme_driver_restore"))
+            .await?;
+
+            self.devices.insert(disk.pci_id.clone(), nvme_driver);
+        }
+
+        Ok(())
     }
 }
 
@@ -293,11 +424,11 @@ impl AsyncResolveResource<DiskHandleKind, NvmeDiskConfig> for NvmeDiskResolver {
             .await
             .context("could not open nvme namespace")?;
 
-        Ok(disk_nvme::NvmeDisk::new(namespace).into())
+        Ok(disk_nvme::NvmeDisk::new(namespace.clone()).into())
     }
 }
 
-#[derive(MeshPayload)]
+#[derive(MeshPayload, Default)]
 pub struct NvmeDiskConfig {
     pub pci_id: String,
     pub nsid: u32,
@@ -305,4 +436,22 @@ pub struct NvmeDiskConfig {
 
 impl ResourceId<DiskHandleKind> for NvmeDiskConfig {
     const ID: &'static str = "nvme";
+}
+
+#[derive(Protobuf, SavedStateRoot)]
+#[mesh(package = "underhill")]
+pub struct NvmeManagerSavedState {
+    #[mesh(1)]
+    pub cpu_count: u32,
+    #[mesh(2)]
+    pub nvme_disks: Vec<NvmeSavedDiskConfig>,
+}
+
+#[derive(Protobuf, Clone)]
+#[mesh(package = "underhill")]
+pub struct NvmeSavedDiskConfig {
+    #[mesh(1)]
+    pub pci_id: String,
+    #[mesh(2)]
+    pub driver_state: nvme_driver::NvmeDriverSavedState,
 }
