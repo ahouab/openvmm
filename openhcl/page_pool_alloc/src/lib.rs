@@ -17,7 +17,6 @@ use hvdef::HV_PAGE_SIZE;
 use inspect::Inspect;
 use parking_lot::Mutex;
 use std::num::NonZeroU64;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use thiserror::Error;
 use vm_topology::memory::MemoryRangeWithNode;
@@ -48,8 +47,9 @@ enum State {
         pfn_bias: u64,
         #[inspect(hex)]
         size_pages: u64,
-        device_id: u64,
-        device_name: String,
+        /// This is an index into the outer [`PagePoolInner`]'s device_ids
+        /// vector.
+        device_id: usize,
         tag: String,
     },
 }
@@ -65,8 +65,12 @@ enum PoolType {
 
 #[derive(Inspect, Debug)]
 struct PagePoolInner {
+    // TODO fix inspect to print string names and numeric ids - self referntial inspect?
     #[inspect(iter_by_index)]
     state: Vec<State>,
+    /// The list of device ids for outstanding allocators. Each are unique.
+    #[inspect(iter_by_index)]
+    device_ids: Vec<String>,
 }
 
 /// A handle for a page pool allocation. When dropped, the allocation is
@@ -109,7 +113,6 @@ impl Drop for PagePoolHandle {
                     pfn_bias: offset,
                     size_pages: len,
                     device_id: _,
-                    device_name: _,
                     tag: _,
                 } = state
                 {
@@ -144,7 +147,6 @@ pub struct PagePool {
     #[inspect(flatten)]
     inner: Arc<Mutex<PagePoolInner>>,
     typ: PoolType,
-    next_device_id: AtomicU64,
 }
 
 impl PagePool {
@@ -161,9 +163,11 @@ impl PagePool {
         }
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(PagePoolInner { state: pages })),
+            inner: Arc::new(Mutex::new(PagePoolInner {
+                state: pages,
+                device_ids: Vec::new(),
+            })),
             typ: PoolType::Private,
-            next_device_id: AtomicU64::new(0),
         })
     }
 
@@ -188,25 +192,36 @@ impl PagePool {
         }
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(PagePoolInner { state: pages })),
+            inner: Arc::new(Mutex::new(PagePoolInner {
+                state: pages,
+                device_ids: Vec::new(),
+            })),
             typ: PoolType::Shared,
-            next_device_id: AtomicU64::new(0),
         })
     }
 
-    /// Create an allocator instance that can be used to allocate pages.
+    /// Create an allocator instance that can be used to allocate pages. The
+    /// specified `device_name` must be unique.
     ///
     /// Users should create a new allocator for each device, as the device name
-    /// and internal identifier is used to track allocations in the pool.
-    pub fn allocator(&self, device_name: String) -> PagePoolAllocator {
-        PagePoolAllocator {
+    /// is used to track allocations in the pool.
+    pub fn allocator(&self, device_name: String) -> anyhow::Result<PagePoolAllocator> {
+        let mut inner = self.inner.lock();
+
+        // device_id must be unique
+        if inner.device_ids.iter().any(|id| id == &device_name) {
+            anyhow::bail!("device name {device_name} already in use");
+        }
+
+        inner.device_ids.push(device_name.clone());
+        let device_id = inner.device_ids.len() - 1;
+
+        Ok(PagePoolAllocator {
             inner: self.inner.clone(),
             typ: self.typ,
-            device_id: self
-                .next_device_id
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            device_id,
             device_name,
-        }
+        })
     }
 
     // TODO: save method and restore
@@ -220,7 +235,7 @@ impl PagePool {
 pub struct PagePoolAllocator {
     inner: Arc<Mutex<PagePoolInner>>,
     typ: PoolType,
-    device_id: u64,
+    device_id: usize,
     device_name: String,
 }
 
@@ -263,7 +278,6 @@ impl PagePoolAllocator {
                     pfn_bias: offset,
                     size_pages,
                     device_id: self.device_id,
-                    device_name: self.device_name.clone(),
                     tag,
                 });
 
@@ -362,7 +376,7 @@ mod test {
             pfn_bias * HV_PAGE_SIZE,
         )
         .unwrap();
-        let alloc = pool.allocator("test".into());
+        let alloc = pool.allocator("test".into()).unwrap();
 
         let a1 = alloc.alloc(5.try_into().unwrap(), "alloc1".into()).unwrap();
         assert_eq!(a1.base_pfn, 10);
@@ -387,5 +401,20 @@ mod test {
 
         let inner = alloc.inner.lock();
         assert_eq!(inner.state.len(), 2);
+    }
+
+    #[test]
+    fn test_duplicate_device_name() {
+        let pool = PagePool::new_shared_visibility_pool(
+            &[MemoryRangeWithNode {
+                range: MemoryRange::from_4k_gpn_range(10..30),
+                vnode: 0,
+            }],
+            0,
+        )
+        .unwrap();
+        let _alloc = pool.allocator("test".into()).unwrap();
+
+        assert!(pool.allocator("test".into()).is_err());
     }
 }

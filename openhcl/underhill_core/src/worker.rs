@@ -740,7 +740,8 @@ impl UhVmNetworkSettings {
             vps_count as u32,
             nic_max_sub_channels,
             servicing_netvsp_state,
-            vfio_dma_buffer(shared_vis_pages_pool, format!("nic_{}", instance_id)),
+            vfio_dma_buffer(shared_vis_pages_pool, format!("nic_{}", instance_id))
+                .context("creating vfio dma buffer")?,
         )
         .await?;
 
@@ -1062,11 +1063,14 @@ fn round_up_to_2mb(bytes: u64) -> u64 {
 fn vfio_dma_buffer(
     shared_vis_pages_pool: &Option<PagePool>,
     device_name: String,
-) -> Arc<dyn VfioDmaBuffer> {
+) -> anyhow::Result<Arc<dyn VfioDmaBuffer>> {
     shared_vis_pages_pool
         .as_ref()
-        .map(|p| -> Arc<dyn VfioDmaBuffer> { Arc::new(p.allocator(device_name)) })
-        .unwrap_or(Arc::new(LockedMemorySpawner))
+        .map(|p| -> anyhow::Result<Arc<dyn VfioDmaBuffer>> {
+            p.allocator(device_name)
+                .map(|alloc| Arc::new(alloc) as Arc<dyn VfioDmaBuffer>)
+        })
+        .unwrap_or(Ok(Arc::new(LockedMemorySpawner)))
 }
 
 #[cfg_attr(guest_arch = "aarch64", allow(dead_code))]
@@ -1499,7 +1503,10 @@ async fn new_underhill_vm(
         .as_ref()
         .map(|p| p.allocator("get".into()))
     {
-        get_client.set_shared_memory_allocator(allocator, gm.untrusted_dma_memory().clone());
+        get_client.set_shared_memory_allocator(
+            allocator.context("get shared memory allocator")?,
+            gm.untrusted_dma_memory().clone(),
+        );
     }
 
     // Create the `AttestationVmConfig` from `dps`, which will be used in
@@ -1656,9 +1663,10 @@ async fn new_underhill_vm(
         emulate_apic,
         vmtime: &vmtime_source,
         isolated_memory_protector: gm.isolated_memory_protector()?,
-        shared_vis_pages_pool: shared_vis_pages_pool
-            .as_ref()
-            .map(|p| p.allocator("partition".into())),
+        shared_vis_pages_pool: shared_vis_pages_pool.as_ref().map(|p| {
+            p.allocator("partition".into())
+                .expect("partition name should be unique")
+        }),
     };
 
     let (partition, vps) = proto_partition
@@ -1746,7 +1754,8 @@ async fn new_underhill_vm(
         let manager = NvmeManager::new(
             &driver_source,
             processor_topology.vp_count(),
-            vfio_dma_buffer(&shared_vis_pages_pool, "nvme_manager".into()),
+            vfio_dma_buffer(&shared_vis_pages_pool, "nvme_manager".into())
+                .context("nvme vfio dma")?,
         );
 
         resolver.add_async_resolver::<DiskHandleKind, _, NvmeDiskConfig, _>(NvmeDiskResolver::new(
