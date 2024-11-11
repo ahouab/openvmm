@@ -13,6 +13,7 @@ use crate::GuestVsmState;
 use crate::GuestVsmVtl1State;
 use crate::GuestVtl;
 use crate::WakeReason;
+use hv1_emulator::RequestInterrupt;
 use hvdef::hypercall::HvFlushFlags;
 use hvdef::HvError;
 use hvdef::HvMapGpaFlags;
@@ -24,7 +25,10 @@ use hvdef::Vtl;
 use std::iter::zip;
 use virt::io::CpuIo;
 use virt::vp::AccessVpState;
+use virt::x86::MsrError;
 use virt::Processor;
+use vtl_array::VtlArray;
+use x86defs::apic::ApicRegister;
 use zerocopy::FromZeroes;
 
 impl<T: CpuIo, B: HardwareIsolatedBacking> UhHypercallHandler<'_, '_, T, B> {
@@ -405,16 +409,9 @@ impl<T, B: HardwareIsolatedBacking> hv1_hypercall::VtlCall for UhHypercallHandle
         B::switch_vtl_state(self.vp, self.intercepted_vtl, GuestVtl::Vtl1);
         self.vp.backing.cvm_state_mut().exit_vtl = GuestVtl::Vtl1;
 
-        // TODO GUEST VSM: reevaluate if the return reason should be set here or
-        // during VTL 2 exit handling
         self.vp.backing.cvm_state_mut().hv[GuestVtl::Vtl1]
             .set_return_reason(HvVtlEntryReason::VTL_CALL)
             .expect("setting return reason cannot fail");
-
-        // TODO GUEST_VSM: Force reevaluation of the VTL 1 APIC in case delivery of
-        // low-priority interrupts was suppressed while in VTL 0.
-
-        // TODO GUEST_VSM: Track which VTLs are runnable and mark VTL as runnable
     }
 }
 
@@ -431,12 +428,16 @@ impl<T, B: HardwareIsolatedBacking> hv1_hypercall::VtlReturn for UhHypercallHand
 
         self.vp.unlock_tlb_lock(Vtl::Vtl1);
 
+        let hv = &mut self.vp.backing.cvm_state_mut().hv[GuestVtl::Vtl1];
+        if hv.synic.vina().auto_reset() {
+            hv.set_vina_asserted(false).unwrap();
+        }
+
         B::switch_vtl_state(self.vp, self.intercepted_vtl, GuestVtl::Vtl0);
         self.vp.backing.cvm_state_mut().exit_vtl = GuestVtl::Vtl0;
 
         // TODO CVM GUEST_VSM:
         // - rewind interrupts
-        // - reset VINA
 
         if !fast {
             let [rax, rcx] = self.vp.backing.cvm_state_mut().hv[GuestVtl::Vtl1]
@@ -595,6 +596,70 @@ impl<B: HardwareIsolatedBacking> UhProcessor<'_, B> {
         guest_vsm.deny_lower_vtl_startup = value.deny_lower_vtl_startup();
 
         Ok(())
+    }
+
+    pub(crate) fn hcvm_handle_cross_vtl_interrupts(
+        &mut self,
+        interrupt_pending: VtlArray<Option<u8>, 2>,
+        lapic_msr_read: impl FnOnce(&mut Self, GuestVtl, u32) -> Result<u64, MsrError>,
+    ) {
+        match self.backing.cvm_state_mut().exit_vtl {
+            GuestVtl::Vtl0 => {
+                // Check for VTL preemption
+                if let Some(vector) = interrupt_pending[GuestVtl::Vtl1] {
+                    let priority = vector >> 4;
+                    if priority > 0 {
+                        let ppr = lapic_msr_read(
+                            self,
+                            GuestVtl::Vtl1,
+                            ApicRegister::PPR.0 as u32 + x86defs::apic::X2APIC_MSR_BASE,
+                        )
+                        .expect("reading PPR should never fail");
+                        let ppr_priority = ppr >> 4;
+                        if priority as u64 > ppr_priority {
+                            B::switch_vtl_state(self, GuestVtl::Vtl0, GuestVtl::Vtl1);
+                            self.backing.cvm_state_mut().exit_vtl = GuestVtl::Vtl1;
+                            self.backing.cvm_state_mut().hv[GuestVtl::Vtl1]
+                                .set_return_reason(HvVtlEntryReason::INTERRUPT)
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+            GuestVtl::Vtl1 => {
+                // Check for VINA
+                if let Some(vector) = interrupt_pending[GuestVtl::Vtl0] {
+                    let priority = vector >> 4;
+                    if priority > 0 {
+                        let hv = &mut self.backing.cvm_state_mut().hv[GuestVtl::Vtl1];
+                        if hv.synic.vina().enabled() && !hv.vina_asserted().unwrap() {
+                            let ppr = lapic_msr_read(
+                                self,
+                                GuestVtl::Vtl1,
+                                ApicRegister::PPR.0 as u32 + x86defs::apic::X2APIC_MSR_BASE,
+                            )
+                            .expect("reading PPR should never fail");
+                            let ppr_priority = ppr >> 4;
+                            if priority as u64 > ppr_priority {
+                                let vp_index = self.vp_index();
+                                let hv = &mut self.backing.cvm_state_mut().hv[GuestVtl::Vtl1];
+                                hv.set_vina_asserted(true).unwrap();
+                                self.partition
+                                    .synic_interrupt(vp_index, GuestVtl::Vtl1)
+                                    .request_interrupt(
+                                        hv.synic.vina().vector().into(),
+                                        hv.synic.vina().auto_eoi(),
+                                    );
+                                // We're about to return to the guest, so we need to
+                                // process the interrupt now. We're already past the update
+                                // loop in run_vp.
+                                self.update_synic(GuestVtl::Vtl1, false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

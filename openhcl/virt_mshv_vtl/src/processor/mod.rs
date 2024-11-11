@@ -204,14 +204,16 @@ mod private {
             this: &mut UhProcessor<'_, Self>,
             dev: &impl CpuIo,
             stop: &mut StopVp<'_>,
+            interrupt_pending: VtlArray<Option<u8>, 2>,
         ) -> impl Future<Output = Result<(), VpHaltReason<UhRunVpError>>>;
 
-        /// Process any pending APIC work.
+        /// Process any pending APIC work. Returns the vector of the next
+        /// pending interrupt if there is one, or u8::MAX for an NMI.
         fn poll_apic(
             this: &mut UhProcessor<'_, Self>,
             vtl: GuestVtl,
             scan_irr: bool,
-        ) -> Result<(), UhRunVpError>;
+        ) -> Result<Option<u8>, UhRunVpError>;
 
         /// Requests the VP to exit when an external interrupt is ready to be
         /// delivered.
@@ -224,14 +226,6 @@ mod private {
         ///
         /// This is used for hypervisor-managed and untrusted SINTs.
         fn request_untrusted_sint_readiness(this: &mut UhProcessor<'_, Self>, sints: u16);
-
-        /// Copies shared registers (per VSM TLFS spec) from the source VTL to
-        /// the target VTL that will become active.
-        fn switch_vtl_state(
-            this: &mut UhProcessor<'_, Self>,
-            source_vtl: GuestVtl,
-            target_vtl: GuestVtl,
-        );
 
         /// Returns whether this VP should be put to sleep in usermode, or
         /// whether it's ready to proceed into the kernel.
@@ -266,6 +260,13 @@ pub trait HardwareIsolatedBacking: Backing {
     fn cvm_state_mut(&mut self) -> &mut crate::UhCvmVpState;
     /// Gets CVM specific partition state.
     fn cvm_partition_state(&self) -> &crate::UhCvmPartitionState;
+    /// Copies shared registers (per VSM TLFS spec) from the source VTL to
+    /// the target VTL that will become active.
+    fn switch_vtl_state(
+        this: &mut UhProcessor<'_, Self>,
+        source_vtl: GuestVtl,
+        target_vtl: GuestVtl,
+    );
 }
 
 #[cfg_attr(guest_arch = "aarch64", allow(dead_code))]
@@ -635,6 +636,8 @@ impl<'p, T: Backing> Processor for UhProcessor<'p, T> {
         let mut first_scan_irr = true;
 
         loop {
+            let mut interrupt_pending: VtlArray<_, 2> = VtlArray::new(None);
+
             // Process VP activity and wait for the VP to be ready.
             poll_fn(|cx| loop {
                 stop.check()?;
@@ -671,8 +674,9 @@ impl<'p, T: Backing> Processor for UhProcessor<'p, T> {
                         self.update_synic(vtl, false);
                     }
 
-                    T::poll_apic(self, vtl, scan_irr[vtl] || first_scan_irr)
-                        .map_err(VpHaltReason::Hypervisor)?;
+                    interrupt_pending[vtl] =
+                        T::poll_apic(self, vtl, scan_irr[vtl] || first_scan_irr)
+                            .map_err(VpHaltReason::Hypervisor)?;
                 }
                 first_scan_irr = false;
 
@@ -709,7 +713,7 @@ impl<'p, T: Backing> Processor for UhProcessor<'p, T> {
                     .into();
             }
 
-            T::run_vp(self, dev, &mut stop).await?;
+            T::run_vp(self, dev, &mut stop, interrupt_pending).await?;
             self.kernel_returns += 1;
         }
     }
