@@ -142,6 +142,8 @@ impl BackingPrivate for HypervisorBackedArm64 {
             tracing::trace!(?notifications, "setting notifications");
             this.runner
                 .set_vp_register(
+                    // TODO GUEST VSM
+                    GuestVtl::Vtl0,
                     VpRegisterName::DeliverabilityNotifications,
                     u64::from(notifications).into(),
                 )
@@ -206,7 +208,11 @@ impl BackingPrivate for HypervisorBackedArm64 {
             .set_interrupt_notification(true);
     }
 
-    fn request_untrusted_sint_readiness(this: &mut UhProcessor<'_, Self>, sints: u16) {
+    fn request_untrusted_sint_readiness(
+        this: &mut UhProcessor<'_, Self>,
+        _vtl: GuestVtl,
+        sints: u16,
+    ) {
         this.backing
             .next_deliverability_notifications
             .set_sints(this.backing.next_deliverability_notifications.sints() | sints);
@@ -371,7 +377,10 @@ impl AccessCpuState for UhProcessor<'_, HypervisorBackedArm64> {
         if self.backing.cpu_state.sp.is_some() {
             expensive_regs.push((HvArm64RegisterName::XSp, self.sp()));
         }
-        self.runner.set_vp_registers(expensive_regs).unwrap();
+        self.runner
+            // TODO GUEST VSM
+            .set_vp_registers(GuestVtl::Vtl0, expensive_regs)
+            .unwrap();
         self.runner.cpu_context_mut().x = self.backing.cpu_state.x;
         self.runner.cpu_context_mut().q = self.backing.cpu_state.q;
     }
@@ -381,7 +390,8 @@ impl AccessCpuState for UhProcessor<'_, HypervisorBackedArm64> {
         if index == 18 && !self.backing.cpu_state.x18_valid {
             let reg_val = self
                 .runner
-                .get_vp_register(HvArm64RegisterName::X18)
+                // TODO GUEST VSM
+                .get_vp_register(GuestVtl::Vtl0, HvArm64RegisterName::X18)
                 .expect("register query should not fail");
             self.backing.cpu_state.x[18] = reg_val.as_u64();
             self.backing.cpu_state.x18_valid = true;
@@ -443,7 +453,8 @@ impl AccessCpuState for UhProcessor<'_, HypervisorBackedArm64> {
         if self.backing.cpu_state.sp.is_none() {
             let reg_val = self
                 .runner
-                .get_vp_register(HvArm64RegisterName::XSp)
+                // TODO GUEST VSM
+                .get_vp_register(GuestVtl::Vtl0, HvArm64RegisterName::XSp)
                 .expect("register query should not fail");
             self.backing.cpu_state.sp = Some(reg_val.as_u64());
         }
@@ -474,7 +485,8 @@ impl AccessCpuState for UhProcessor<'_, HypervisorBackedArm64> {
         if self.backing.cpu_state.pc.is_none() {
             let reg_val = self
                 .runner
-                .get_vp_register(HvArm64RegisterName::XPc)
+                // TODO GUEST VSM
+                .get_vp_register(GuestVtl::Vtl0, HvArm64RegisterName::XPc)
                 .expect("register query should not fail");
             self.backing.cpu_state.pc = Some(reg_val.as_u64());
         }
@@ -489,7 +501,8 @@ impl AccessCpuState for UhProcessor<'_, HypervisorBackedArm64> {
         if self.backing.cpu_state.cpsr.is_none() {
             let reg_val = self
                 .runner
-                .get_vp_register(HvArm64RegisterName::Cpsr)
+                // TODO GUEST VSM
+                .get_vp_register(GuestVtl::Vtl0, HvArm64RegisterName::Cpsr)
                 .expect("register query should not fail");
             self.backing.cpu_state.cpsr = Some(reg_val.as_u64());
         }
@@ -579,7 +592,8 @@ impl<T: CpuIo> EmulatorSupport for UhEmulationState<'_, '_, T, HypervisorBacked>
             let cpsr: Cpsr64 = self
                 .vp
                 .runner
-                .get_vp_register(HvArm64RegisterName::SpsrEl2)
+                // TODO GUEST VSM
+                .get_vp_register(GuestVtl::Vtl0, HvArm64RegisterName::SpsrEl2)
                 .map_err(UhRunVpError::EmulationState)?
                 .as_u64()
                 .into();
@@ -812,7 +826,7 @@ impl UhVpStateAccess<'_, '_, HypervisorBackedArm64> {
         regs.get_values(values.iter_mut());
         self.vp
             .runner
-            .set_vp_registers(names.iter().copied().zip(values))
+            .set_vp_registers(self.vtl, names.iter().copied().zip(values))
             .map_err(vp_state::Error::SetRegisters)?;
         Ok(())
     }
@@ -828,7 +842,7 @@ impl UhVpStateAccess<'_, '_, HypervisorBackedArm64> {
         let mut values = [HvRegisterValue::new_zeroed(); N];
         self.vp
             .runner
-            .get_vp_registers(&names, &mut values)
+            .get_vp_registers(self.vtl, &names, &mut values)
             .map_err(vp_state::Error::GetRegisters)?;
 
         regs.set_values(values.into_iter());
@@ -877,10 +891,12 @@ impl AccessVpState for UhVpStateAccess<'_, '_, HypervisorBackedArm64> {
     }
 }
 
+// TODO GUEST VSM Audit save state
 mod save_restore {
     use super::HypervisorBackedArm64;
     use super::UhProcessor;
     use anyhow::anyhow;
+    use hcl::GuestVtl;
     use hvdef::HvArm64RegisterName;
     use hvdef::HvInternalActivityRegister;
     use virt::Processor;
@@ -914,7 +930,8 @@ mod save_restore {
 
             let internal_activity = self
                 .runner
-                .get_vp_register(HvArm64RegisterName::InternalActivityState)
+                // TODO GUEST VSM
+                .get_vp_register(GuestVtl::Vtl0, HvArm64RegisterName::InternalActivityState)
                 .map_err(|err| {
                     SaveError::Other(anyhow!("unable to query startup suspend: {}", err))
                 })?;
@@ -935,7 +952,11 @@ mod save_restore {
             if state.startup_suspend {
                 let reg = u64::from(HvInternalActivityRegister::new().with_startup_suspend(true));
                 self.runner
-                    .set_vp_registers([(HvArm64RegisterName::InternalActivityState, reg)])
+                    .set_vp_registers(
+                        // TODO GUEST VSM
+                        GuestVtl::Vtl0,
+                        [(HvArm64RegisterName::InternalActivityState, reg)],
+                    )
                     .map_err(|err| {
                         RestoreError::Other(anyhow!(
                             "unable to set internal activity register: {}",
