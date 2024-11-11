@@ -52,6 +52,7 @@ use hvdef::Vtl;
 use hvdef::HV_PAGE_SIZE;
 use hvdef::HV_PARTITION_ID_SELF;
 use hvdef::HV_VP_INDEX_SELF;
+use itertools::Itertools;
 use memory_range::MemoryRange;
 use pal::unix::pthread::*;
 use parking_lot::Mutex;
@@ -790,8 +791,6 @@ fn is_vtl_shared_reg(reg: HvX64RegisterName) -> bool {
 /// Indicate whether reg is shared across VTLs.
 #[cfg(guest_arch = "aarch64")]
 fn is_vtl_shared_reg(reg: HvArm64RegisterName) -> bool {
-    use hvdef::HvArm64RegisterName;
-
     matches!(
         reg,
         HvArm64RegisterName::X0
@@ -1344,20 +1343,22 @@ impl MshvHvcall {
         Ok(())
     }
 
-    /// Get a single VP register for the given VTL via hypercall. The call will
-    /// panic if the hypercall fails.
-    fn get_vp_register_for_vtl_inner(
+    /// Get VP registers for the given VTL via hypercall. The call will panic
+    /// if the hypercall fails.
+    fn get_vp_registers_for_vtl_inner(
         &self,
         target_vtl: HvInputVtl,
-        name: HvRegisterName,
-    ) -> HvRegisterValue {
+        names: &[HvRegisterName],
+        output: &mut [HvRegisterValue],
+    ) {
+        assert!(output.len() >= names.len());
+
         let header = hvdef::hypercall::GetSetVpRegisters {
             partition_id: HV_PARTITION_ID_SELF,
             vp_index: HV_VP_INDEX_SELF,
             target_vtl,
             rsvd: [0; 3],
         };
-        let mut output = [HvRegisterValue::new_zeroed()];
 
         // SAFETY: The input header and rep slice are the correct types for this hypercall.
         //         The hypercall output is validated right after the hypercall is issued.
@@ -1365,17 +1366,15 @@ impl MshvHvcall {
             self.hvcall_rep(
                 HypercallCode::HvCallGetVpRegisters,
                 &header,
-                HvcallRepInput::Elements(&[name]),
-                Some(&mut output),
+                HvcallRepInput::Elements(names),
+                Some(output),
             )
             .expect("get_vp_register hypercall should not fail")
         };
 
-        // Status must be success with 1 rep completed
+        // Status must be success with the correct number of reps completed.
         status.result().unwrap();
-        assert_eq!(status.elements_processed(), 1);
-
-        output[0]
+        assert_eq!(status.elements_processed() as usize, names.len());
     }
 
     /// Get a single VP register for the given VTL via hypercall. Only a select
@@ -1386,6 +1385,8 @@ impl MshvHvcall {
         vtl: HvInputVtl,
         name: HvX64RegisterName,
     ) -> HvRegisterValue {
+        let mut output = [HvRegisterValue::new_zeroed()];
+
         match vtl.target_vtl().unwrap() {
             None | Some(Vtl::Vtl2) => {
                 assert!(matches!(
@@ -1417,7 +1418,8 @@ impl MshvHvcall {
             }
         }
 
-        self.get_vp_register_for_vtl_inner(vtl, name.into())
+        self.get_vp_registers_for_vtl_inner(vtl, &[name.into()], &mut output);
+        output[0]
     }
 
     /// Get a single VP register for the given VTL via hypercall. Only a select
@@ -1428,6 +1430,8 @@ impl MshvHvcall {
         vtl: HvInputVtl,
         name: HvArm64RegisterName,
     ) -> HvRegisterValue {
+        let mut output = [HvRegisterValue::new_zeroed()];
+
         match vtl.target_vtl().unwrap() {
             None | Some(Vtl::Vtl2) => {
                 assert!(matches!(
@@ -1455,7 +1459,8 @@ impl MshvHvcall {
             }
         }
 
-        self.get_vp_register_for_vtl_inner(vtl, name.into())
+        self.get_vp_registers_for_vtl_inner(vtl, &[name.into()], &mut output);
+        output[0]
     }
 }
 
@@ -1697,32 +1702,6 @@ impl<T> Drop for ProcessorRunner<'_, T> {
 }
 
 impl<'a, T: Backing> ProcessorRunner<'a, T> {
-    // These registers are handled specially by the kernel through a dedicated
-    // ioctl. is_kernel_managed is arch-specific to guard against an into() on
-    // an HvArmRegisterName that overlaps one of these x86-specific values.
-    #[cfg(guest_arch = "x86_64")]
-    fn is_kernel_managed(&self, name: HvX64RegisterName) -> bool {
-        if name == HvX64RegisterName::Xfem {
-            self.hcl.isolation == IsolationType::Tdx
-        } else if name == HvX64RegisterName::Dr6 {
-            self.hcl.dr6_shared()
-        } else {
-            is_vtl_shared_mtrr(name)
-                || matches!(
-                    name,
-                    HvX64RegisterName::Dr0
-                        | HvX64RegisterName::Dr1
-                        | HvX64RegisterName::Dr2
-                        | HvX64RegisterName::Dr3
-                )
-        }
-    }
-
-    #[cfg(guest_arch = "aarch64")]
-    fn is_kernel_managed(&self, _name: HvArm64RegisterName) -> bool {
-        false
-    }
-
     fn set_reg(&mut self, vtl: GuestVtl, regs: &[HvRegisterAssoc]) -> Result<(), Error> {
         if regs.is_empty() {
             return Ok(());
@@ -1733,36 +1712,43 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
                 .set_vp_registers(vtl.into(), regs)
                 .map_err(Error::Sidecar)?;
         } else {
-            // TODO: group up to MSHV_VP_MAX_REGISTERS regs. The kernel
-            // currently has a bug where it only supports one register at a
-            // time. Once that's fixed, this code could set a group of
-            // registers in one ioctl.
-            for reg in regs {
-                let hc_regs = &mut [HvRegisterAssoc {
-                    name: reg.name,
-                    pad: [0; 3],
-                    value: reg.value,
-                }];
-
-                if self.is_kernel_managed(reg.name.into()) {
-                    let hv_vp_register_args = mshv_vp_registers {
-                        count: 1,
-                        regs: hc_regs.as_mut_ptr(),
-                    };
-                    // SAFETY: ioctl call with correct types.
-                    unsafe {
-                        hcl_set_vp_register(
-                            self.hcl.mshv_vtl.file.as_raw_fd(),
-                            &hv_vp_register_args,
-                        )
-                        .map_err(Error::SetVpRegister)?;
+            for (is_kernel_managed, chunk) in &regs
+                .into_iter()
+                .chunk_by(|r| self.hcl.is_kernel_managed(r.name.into()))
+            {
+                if is_kernel_managed {
+                    // TODO: group up to MSHV_VP_MAX_REGISTERS regs. The kernel
+                    // currently has a bug where it only supports one register
+                    // at a time. Once that's fixed, this code could set a
+                    // group of registers in one ioctl.
+                    for reg in chunk {
+                        let hc_regs = &mut [HvRegisterAssoc {
+                            name: reg.name,
+                            pad: [0; 3],
+                            value: reg.value,
+                        }];
+                        let hv_vp_register_args = mshv_vp_registers {
+                            count: 1,
+                            regs: hc_regs.as_mut_ptr(),
+                        };
+                        // SAFETY: ioctl call with correct types.
+                        unsafe {
+                            hcl_set_vp_register(
+                                self.hcl.mshv_vtl.file.as_raw_fd(),
+                                &hv_vp_register_args,
+                            )
+                            .map_err(Error::SetVpRegister)?;
+                        }
                     }
                 } else {
-                    let hc_regs = [HvRegisterAssoc {
-                        name: reg.name,
-                        pad: [0; 3],
-                        value: reg.value,
-                    }];
+                    // Copy chunk into contiguous vec and ensure pad is zero.
+                    let hc_regs: Vec<HvRegisterAssoc> = chunk
+                        .map(|r| HvRegisterAssoc {
+                            name: r.name,
+                            pad: [0; 3],
+                            value: r.value,
+                        })
+                        .collect();
                     self.set_vp_registers_hvcall_inner(vtl.into(), &hc_regs)
                         .map_err(Error::SetRegisters)?;
                 }
@@ -1781,30 +1767,39 @@ impl<'a, T: Backing> ProcessorRunner<'a, T> {
                 .get_vp_registers(vtl.into(), regs)
                 .map_err(Error::Sidecar)?;
         } else {
-            // TODO: group up to MSHV_VP_MAX_REGISTERS regs. The kernel
-            // currently has a bug where it only supports one register at a
-            // time. Once that's fixed, this code could set a group of
-            // registers in one ioctl.
-            for reg in regs {
-                if self.is_kernel_managed(reg.name.into()) {
-                    let mut mshv_vp_register_args = mshv_vp_registers {
-                        count: 1,
-                        regs: reg,
-                    };
-                    // SAFETY: we know that our file is a vCPU fd, we know the kernel will only read the
-                    // correct amount of memory from our pointer, and we verify the return result.
-                    unsafe {
-                        hcl_get_vp_register(
-                            self.hcl.mshv_vtl.file.as_raw_fd(),
-                            &mut mshv_vp_register_args,
-                        )
-                        .map_err(Error::GetVpRegister)?;
+            for (is_kernel_managed, chunk) in &regs
+                .into_iter()
+                .chunk_by(|r| self.hcl.is_kernel_managed(r.name.into()))
+            {
+                if is_kernel_managed {
+                    // TODO: group up to MSHV_VP_MAX_REGISTERS regs. The kernel
+                    // currently has a bug where it only supports one register
+                    // at a time. Once that's fixed, this code could set a
+                    // group of registers in one ioctl.
+                    for reg in chunk {
+                        let mut mshv_vp_register_args = mshv_vp_registers {
+                            count: 1,
+                            regs: reg,
+                        };
+                        // SAFETY: we know that our file is a vCPU fd, we know the kernel will only read the
+                        // correct amount of memory from our pointer, and we verify the return result.
+                        unsafe {
+                            hcl_get_vp_register(
+                                self.hcl.mshv_vtl.file.as_raw_fd(),
+                                &mut mshv_vp_register_args,
+                            )
+                            .map_err(Error::GetVpRegister)?;
+                        }
                     }
                 } else {
-                    reg.value = self
-                        .hcl
-                        .mshv_hvcall
-                        .get_vp_register_for_vtl(vtl.into(), reg.name.into());
+                    let names: Vec<_> = chunk.map(|r| r.name).collect();
+                    let mut output: Vec<_> = Vec::with_capacity(names.len());
+                    output.resize(names.len(), HvRegisterValue::new_zeroed());
+                    self.hcl.mshv_hvcall.get_vp_registers_for_vtl_inner(
+                        vtl.into(),
+                        &names,
+                        &mut output,
+                    );
                 }
             }
         }
@@ -2105,6 +2100,32 @@ thread_local! {
 }
 
 impl Hcl {
+    // These registers are handled specially by the kernel through a dedicated
+    // ioctl. is_kernel_managed is arch-specific to guard against an into() on
+    // an HvArmRegisterName that overlaps one of these x86-specific values.
+    #[cfg(guest_arch = "x86_64")]
+    fn is_kernel_managed(&self, name: HvX64RegisterName) -> bool {
+        if name == HvX64RegisterName::Xfem {
+            self.isolation == IsolationType::Tdx
+        } else if name == HvX64RegisterName::Dr6 {
+            self.dr6_shared()
+        } else {
+            is_vtl_shared_mtrr(name)
+                || matches!(
+                    name,
+                    HvX64RegisterName::Dr0
+                        | HvX64RegisterName::Dr1
+                        | HvX64RegisterName::Dr2
+                        | HvX64RegisterName::Dr3
+                )
+        }
+    }
+
+    #[cfg(guest_arch = "aarch64")]
+    fn is_kernel_managed(&self, _name: HvArm64RegisterName) -> bool {
+        false
+    }
+
     /// Returns a new HCL instance.
     pub fn new(isolation: IsolationType, sidecar: Option<SidecarClient>) -> Result<Hcl, Error> {
         static SIGNAL_HANDLER_INIT: Once = Once::new();
